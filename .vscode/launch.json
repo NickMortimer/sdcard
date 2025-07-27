@@ -1,0 +1,63 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+
+        {
+            "name": "Python Debugger: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal"
+        },
+{
+            "name": "register ",
+            "type": "python",
+            "request": "launch",
+            "program": "",
+            "cwd": "/mnt/md1/fieldraid1/DR2024-02",
+            "console": "integratedTerminal",
+            "args":[],
+            "justMyCode": true,
+        },
+        {
+            "name": "sdcard register",
+            "type": "python",
+            "request": "launch",
+            "program": "/home/mor582/code/sdcard/sdcard/main.py",
+            "cwd": "/mnt/datasets/fielddata0/fielddata0/LI2024-01",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args":["register","--all","--cardsize","256","--overwrite",]
+        },        {
+            "name": "sdcard copy",
+            "type": "python",
+            "request": "launch",
+            "program": "/home/mor582/code/sdcard/sdcard/main.py",
+            "cwd": "/mnt/datasets/fielddata0/fielddata0/LI2024-01",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args":["import","--all","--cardsize","256","--copy"]
+        },   {
+            "name": "sdcard copy",
+            "type": "python",
+            "request": "launch",
+            "program": "/home/mor582/code/sdcard/sdcard/import_all.py",
+            "cwd": "/mnt/datasets/fielddata0/fielddata0/LI2024-01",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        }, {
+            "name": "sdcard copy",
+            "type": "python",
+            "request": "launch",
+            "program": "/home/mor582/code/sdcard/sdcard/import_all.py",
+            "cwd": "/mnt/datasets/fielddata0/fielddata0/LI2024-01",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args":["--debug"]
+        },
+    ]
+}
+
