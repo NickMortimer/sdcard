@@ -541,20 +541,28 @@ def import_all(config_path: str = typer.Option(None, help="Root path to MarImBA 
                 drives_str = " ".join(assigned_drives)
                 clean_flag = " --clean" if clean else ""
 
-                # Get current Python executable path
+                # Get current Python executable path and venv path
                 python_exe = sys.executable
-
-                # Use 64-bit PowerShell explicitly
+                venv_path = sys.prefix
                 powershell_64 = r"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
 
-                # Build the command string with robust quoting
-                import shlex
-                python_cmd = f'& "{python_exe}" -m sdcard import {drives_str}{clean_flag}'
-                powershell_args = f'-NoExit -Command "{python_cmd}"'
+                # Detect conda environment
+                conda_env = os.environ.get('CONDA_DEFAULT_ENV')
+                if conda_env:
+                    # Use conda activate
+                    python_cmd = f"python -m sdcard import {drives_str}{clean_flag}"
+                    ps_command = f"conda activate {conda_env}; {python_cmd}"
+                else:
+                    # Use venv activation
+                    activate_ps1 = os.path.join(venv_path, 'Scripts', 'Activate.ps1')
+                    python_cmd = f"python -m sdcard import {drives_str}{clean_flag}"
+                    ps_command = f"& '{activate_ps1}'; {python_cmd}"
+
                 cmd = [
                     powershell_64,
+                    "-NoExit",
                     "-Command",
-                    f"Start-Process -FilePath '{powershell_64}' -ArgumentList '{powershell_args}'"
+                    ps_command
                 ]
                 print("[DEBUG] PowerShell command:", cmd)
                 proc = subprocess.Popen(cmd)
