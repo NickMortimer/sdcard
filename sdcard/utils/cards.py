@@ -46,7 +46,7 @@ def get_available_cards(format_type='exfat',maxcardsize=512):
                 usage = psutil.disk_usage(part.mountpoint)
                 if usage.total < maxcardsize * 1024**3:  # Less than maxcardsize GB
                     usb_host = get_usb_info(part.device)
-                    if usb_host:
+                    if usb_host is not None:
                         drives.append({
                             'mountpoint': part.mountpoint,
                             'host': f"usb{usb_host}",
