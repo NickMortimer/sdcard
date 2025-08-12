@@ -529,27 +529,30 @@ def import_all(config_path: str = typer.Option(None, help="Root path to MarImBA 
         for terminal_key, assigned_drives in terminal_assignments.items():
             if not assigned_drives:
                 continue
-                
+
             if debug:
                 # In debug mode, process sequentially
                 for drive in assigned_drives:
                     runner.invoke(sdcard, ["import", drive] + (['--clean'] if clean else []))
             else:
-                # Launch PowerShell terminal with all assigned drives
+                # Launch 64-bit PowerShell terminal with all assigned drives
                 drives_str = " ".join(assigned_drives)
                 clean_flag = " --clean" if clean else ""
-                
+
                 # Get current Python executable path
                 python_exe = sys.executable
-                
+
+                # Use 64-bit PowerShell explicitly
+                powershell_64 = r"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+
                 cmd = [
-                    "powershell",
+                    powershell_64,
                     "-Command",
-                    f"Start-Process powershell -ArgumentList '-NoExit -Command \"& \\\"{python_exe}\\\" -m sdcard import {drives_str}{clean_flag}\"'"
+                    f"Start-Process '{powershell_64}' -ArgumentList '-NoExit -Command \"& \\\"{python_exe}\\\" -m sdcard import {drives_str}{clean_flag}\"'"
                 ]
                 proc = subprocess.Popen(cmd)
                 processes.add(proc)
-                print(f"   ✅ Launched PowerShell terminal for {len(assigned_drives)} drives")
+                print(f"   ✅ Launched 64-bit PowerShell terminal for {len(assigned_drives)} drives")
 
         # Don't wait for PowerShell processes - they run independently for better performance
         if processes:
