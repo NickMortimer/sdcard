@@ -25,6 +25,8 @@ from sdcard.utils.usb import (
 from sdcard.utils.cards import get_available_cards
 from collections import defaultdict
 import pandas as pd
+from typer.testing import CliRunner
+import typer
 
 
 __author__ = "GoPro BRUV Development Team"
