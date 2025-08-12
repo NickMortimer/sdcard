@@ -84,9 +84,10 @@
             "name": "windows import_all",
             "type": "python",
             "request": "launch",
-            "program": "c:/code/sdcard/sdcard/import_all.py",
+            "program": "c:/code/sdcard/sdcard/main.py",
             "cwd": "c:\\LI2024-01",
             "console": "integratedTerminal",
+            "args":["all"],
             "justMyCode": true
         },
     ]
