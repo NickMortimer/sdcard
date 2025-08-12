@@ -545,11 +545,16 @@ def import_all(config_path: str = typer.Option(None, help="Root path to MarImBA 
                 # Use 64-bit PowerShell explicitly
                 powershell_64 = r"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
 
+                # Build the command string with robust quoting
+                import shlex
+                python_cmd = f'& "{python_exe}" -m sdcard import {drives_str}{clean_flag}'
+                powershell_args = f'-NoExit -Command "{python_cmd}"'
                 cmd = [
                     powershell_64,
                     "-Command",
-                    f"Start-Process '{powershell_64}' -ArgumentList '-NoExit -Command \"& \\\"{python_exe}\\\" -m sdcard import {drives_str}{clean_flag}\"'"
+                    f"Start-Process -FilePath '{powershell_64}' -ArgumentList '{powershell_args}'"
                 ]
+                print("[DEBUG] PowerShell command:", cmd)
                 proc = subprocess.Popen(cmd)
                 processes.add(proc)
                 print(f"   ✅ Launched 64-bit PowerShell terminal for {len(assigned_drives)} drives")
