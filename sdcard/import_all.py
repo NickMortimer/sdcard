@@ -25,28 +25,21 @@ sdall = typer.Typer(
     name="Import all SD cards",
 )
 
-@sdall.command('import_all')
-def import_all(config_path: str = typer.Option(None, help="Root path to MarImBA collection."),
-         max_processes:int = typer.Option(4, help="Number of concurrent transfers"),
+@sdall.command('probe')
+def probe(config_path: str = typer.Option(None, help="Root path to MarImBA collection."),
          format_type:str = typer.Option('exfat', help="Card format type"),
          card_size:int = typer.Option(512, help="maximum card size"),
-         clean:bool = typer.Option(False, help="move all the files to location"),
-         debug:bool = typer.Option(False, help="Card format type"),
          max_sd_speed:float = typer.Option(140.0, help="Maximum realistic SD card read speed in MB/s"),
          dest_write_speed:float = typer.Option(None, help="Override destination drive write speed in MB/s (auto-detect if not specified)")):
+    """Probe and analyze USB device tree, SD cards, and system capabilities."""
     
     if platform.system() == "Linux":
-        processes = set()
-        runner = CliRunner()
         config = Config(config_path)
         destination_path = config.get_path('card_store')
         # Get USB card info and available ports (filtered by size and format)
         usb_cards, available_ports = get_complete_usb_card_info(destination_path, card_size, format_type)
         
         # Analyze destination drives with optional override
-
-        #get destination drive
-
         destinations = analyze_destination_capacity(usb_cards, dest_write_speed, destination_path)
         
         # Scan Thunderbolt ports (for display purposes)
@@ -252,12 +245,113 @@ def import_all(config_path: str = typer.Option(None, help="Root path to MarImBA 
             else:
                 print(f"    🎯 Realistic Speed: {realistic_speed:.1f} MB/s (SD card limited)")
             print()
+            
+    else:
+        # Windows version - use existing get_available_cards function        
+        # Get available cards using the existing function
+        drives_info = get_available_cards(format_type, card_size)
+        
+        # Filter for cards with import.yml and extract mountpoints
+        valid_drives = []
+        cards_without_config = []
+        
+        for drive_info in drives_info:
+            mountpoint = drive_info['mountpoint']
+            import_yml_path = Path(mountpoint) / "import.yml"
+            
+            if import_yml_path.exists():
+                valid_drives.append(mountpoint)
+            else:
+                cards_without_config.append(mountpoint)
+        
+        # Show warning for cards without config
+        if cards_without_config:
+            print("⚠️  CONFIGURATION WARNINGS:")
+            print("=" * 60)
+            print(f"❌ {len(cards_without_config)} SD cards missing import.yml configuration:")
+            for card_path in cards_without_config:
+                print(f"   • {card_path}")
+            print()
+            print("💡 These cards will be SKIPPED during import processing.")
+            print("   Create import.yml files to include them in the import.")
+            print()
+        
+        if not valid_drives:
+            print("❌ No valid Windows drives found for import")
+            return
+        
+        print(f"📊 Found {len(valid_drives)} Windows drives with import.yml")
+        for drive in valid_drives:
+            print(f"   ✅ {drive}")
+    
+    print("✅ Probe analysis completed!")
+
+@sdall.command('import_all')
+def import_all(config_path: str = typer.Option(None, help="Root path to MarImBA collection."),
+         max_processes:int = typer.Option(4, help="Number of concurrent transfers"),
+         format_type:str = typer.Option('exfat', help="Card format type"),
+         card_size:int = typer.Option(512, help="maximum card size"),
+         clean:bool = typer.Option(False, help="move all the files to location"),
+         debug:bool = typer.Option(False, help="Card format type"),
+         max_sd_speed:float = typer.Option(140.0, help="Maximum realistic SD card read speed in MB/s"),
+         dest_write_speed:float = typer.Option(None, help="Override destination drive write speed in MB/s (auto-detect if not specified)")):
+    
+    if platform.system() == "Linux":
+        processes = set()
+        runner = CliRunner()
+        config = Config(config_path)
+        destination_path = config.get_path('card_store')
+        # Get USB card info and available ports (filtered by size and format)
+        usb_cards, available_ports = get_complete_usb_card_info(destination_path, card_size, format_type)
+        
+        # Analyze destination drives with optional override
+        destinations = analyze_destination_capacity(usb_cards, dest_write_speed, destination_path)
+        
+        # Scan Thunderbolt ports (for display purposes)
+        thunderbolt_ports, thunderbolt_controllers = scan_thunderbolt_ports()
+        
+        # Use system-based Thunderbolt detection instead of boltctl analysis
+        thunderbolt_bandwidth = detect_thunderbolt_upstream_capacity()
+        
+        # Calculate realistic transfer rates based on SD card limitations
+        for i, row in usb_cards.iterrows():
+            # Cap transfer rate at SD card maximum
+            usb_cards.at[i, 'actual_transfer_rate'] = min(row['actual_transfer_rate'], max_sd_speed)
+            
+            # Add realistic single-card speed
+            usb_cards.at[i, 'realistic_single_speed'] = min(row['actual_transfer_rate'], max_sd_speed)
+        
+        # Calculate saturation based on realistic SD card speeds
+        saturation_info = None
+        if thunderbolt_bandwidth:
+            thunderbolt_devices = []
+            total_thunderbolt_demand = 0
+            
+            for _, card in usb_cards.iterrows():
+                if card.get('thunderbolt_connected', False):
+                    thunderbolt_devices.append(card)
+                    realistic_speed = min(card.get('actual_transfer_rate', 0), max_sd_speed)
+                    total_thunderbolt_demand += realistic_speed
+            
+            upstream_capacity = thunderbolt_bandwidth.get('practical_usb_capacity_mbps', 0)
+            utilization_percentage = (total_thunderbolt_demand / upstream_capacity * 100) if upstream_capacity > 0 else 0
+            
+            saturation_info = {
+                'thunderbolt_devices': len(thunderbolt_devices),
+                'total_demand_mbps': total_thunderbolt_demand,
+                'upstream_capacity_mbps': upstream_capacity,
+                'utilization_percentage': utilization_percentage,
+                'is_saturated': utilization_percentage > 90,
+                'headroom_mbps': upstream_capacity - total_thunderbolt_demand,
+                'devices': thunderbolt_devices
+            }
+        
+        if usb_cards.empty:
+            print("No SD cards found")
+            return
         
         # Sort by transfer speed for processing
         usb_cards = usb_cards.sort_values('realistic_single_speed', ascending=False)
-        
-        print("🚀 Processing order (fastest first):")
-        print("-" * 60)
         
         # Group cards by their READER for efficient dual-slot processing
         grouped_cards = {}
@@ -321,7 +415,6 @@ def import_all(config_path: str = typer.Option(None, help="Root path to MarImBA 
         
         # Filter for cards with import.yml and extract mountpoints
         valid_drives = []
-        cards_without_config = []
         
         for drive_info in drives_info:
             mountpoint = drive_info['mountpoint']
@@ -330,19 +423,7 @@ def import_all(config_path: str = typer.Option(None, help="Root path to MarImBA 
             if import_yml_path.exists():
                 valid_drives.append(mountpoint)
             else:
-                cards_without_config.append(mountpoint)
-        
-        # Show warning for cards without config
-        if cards_without_config:
-            print("⚠️  CONFIGURATION WARNINGS:")
-            print("=" * 60)
-            print(f"❌ {len(cards_without_config)} SD cards missing import.yml configuration:")
-            for card_path in cards_without_config:
-                print(f"   • {card_path}")
-            print()
-            print("💡 These cards will be SKIPPED during import processing.")
-            print("   Create import.yml files to include them in the import.")
-            print()
+                print(f"❌ Card {mountpoint} does not have import.yml, skipping")
         
         if not valid_drives:
             print("❌ No valid Windows drives found for import")
@@ -380,10 +461,13 @@ def import_all(config_path: str = typer.Option(None, help="Root path to MarImBA 
                 drives_str = " ".join(assigned_drives)
                 clean_flag = " --clean" if clean else ""
                 
+                # Get current Python executable path
+                python_exe = sys.executable
+                
                 cmd = [
                     "powershell",
                     "-Command",
-                    f"Start-Process powershell -ArgumentList '-NoExit -Command \"& python -m sdcard import {drives_str}{clean_flag}\"'"
+                    f"Start-Process powershell -ArgumentList '-NoExit -Command \"& \\\"{python_exe}\\\" -m sdcard import {drives_str}{clean_flag}\"'"
                 ]
                 proc = subprocess.Popen(cmd)
                 processes.add(proc)

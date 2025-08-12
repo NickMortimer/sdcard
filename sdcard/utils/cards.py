@@ -70,15 +70,22 @@ def get_usb_info(device_path):
             if host_match:
                 return host_match.group(1)
     else:
-        import wmi
-        c = wmi.WMI()
-        # Convert drive letter to physical disk
-        for disk in c.Win32_DiskDrive():
-            for partition in disk.associators("Win32_DiskDriveToDiskPartition"):
-                for logical_disk in partition.associators("Win32_LogicalDiskToPartition"):
-                    if logical_disk.DeviceID.replace(":", "") == device_path[0]:
-                        # Get USB controller info from host controller
-                        return disk.SCSIPort
+        try:
+            import wmi
+            c = wmi.WMI()
+            # Convert drive letter to physical disk
+            for disk in c.Win32_DiskDrive():
+                for partition in disk.associators("Win32_DiskDriveToDiskPartition"):
+                    for logical_disk in partition.associators("Win32_LogicalDiskToPartition"):
+                        if logical_disk.DeviceID.replace(":", "") == device_path[0]:
+                            # Get USB controller info from host controller
+                            # SCSIPort is valid (can be 0) - it's the SCSI adapter number
+                            return disk.SCSIPort
+            # If no matching disk found
+            return None
+        except Exception as e:
+            # If WMI fails (permissions, missing module, etc.)
+            return None
                     
 def list_sdcards(format_type,maxcardsize=512):
     """
