@@ -2,9 +2,13 @@
 File system utils
 """
 
-import os
+
 from math import  ceil
 import psutil
+import platform
+import subprocess
+import re
+
             
 def list_sdcards(format_type,maxcardsize=512):
     """
@@ -21,3 +25,4 @@ def list_sdcards(format_type,maxcardsize=512):
             if ceil(p.total/1000000000)<=maxcardsize:            
                 result.append(i.mountpoint)
     return result
+

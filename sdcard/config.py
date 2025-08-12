@@ -5,7 +5,7 @@ import yaml
 
 class Config:
     def __init__(self, config_path: Optional[Path] = None):
-        self.config_path = config_path or Path.cwd() / 'config.yml'
+        self.config_path =  Path.cwd() / 'config.yml' if config_path is None else Path(config_path)
         self.catalog_dir = self.config_path.parent
         self.data = self._load_config()
 

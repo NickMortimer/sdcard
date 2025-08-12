@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>SD Card Import</title>
+    <style>
+        .card-group {
+            margin: 10px;
+            padding: 10px;
+            border: 1px solid #ccc;
+        }
+    </style>
+</head>
+<body>
+    <h1>SD Card Import</h1>
+    <div id="card-list"></div>
+    <button onclick="startImport()">Import Selected Cards</button>
+
+    <script>
+        async function loadCards() {
+            const response = await fetch('/api/cards');
+            const data = await response.json();
+            const container = document.getElementById('card-list');
+            
+            // Group cards by USB host
+            const groups = {};
+            data.cards.forEach(card => {
+                if (!groups[card.host]) groups[card.host] = [];
+                groups[card.host].push(card);
+            });
+            
+            // Create card groups
+            Object.entries(groups).forEach(([host, cards]) => {
+                const div = document.createElement('div');
+                div.className = 'card-group';
+                div.innerHTML = `
+                    <h3>Reader ${host}</h3>
+                    ${cards.map(card => `
+                        <div>
+                            <input type="checkbox" value="${card.mountpoint}">
+                            Card: ${card.card_number} Mount: ${card.mountpoint} (${card.size_gb}GB)
+                        </div>
+                    `).join('')}
+                `;
+                container.appendChild(div);
+            });
+        }
+
+        async function startImport() {
+            const selected = Array.from(document.querySelectorAll('input:checked'))
+                .map(input => input.value);
+                
+            const response = await fetch('/api/import', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    cards: selected,
+                    clean: false
+                })
+            });
+            
+            const result = await response.json();
+            alert(result.message);
+        }
+
+        loadCards();
+    </script>
+</body>
+</html>
