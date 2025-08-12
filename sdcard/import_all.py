@@ -5,7 +5,6 @@ import shlex
 from typer.testing import CliRunner
 import typer
 import platform
-import psutil
 import sys
 from pathlib import Path
 from sdcard.config import Config  
