@@ -31,7 +31,7 @@ format_type = 'exfat'
 def task_create_json():
         config = Config(get_var('config',None))
         if platform.system() == 'Windows':
-            exiftool_path = config.current_path / 'bin' /'exiftool.exe'
+            exiftool_path = config.catalog_dir / 'bin' /'exiftool.exe'
         else:
             exiftool_path = 'exiftool'
         for path in config.get_path('card_store').rglob('100GOPRO'):
