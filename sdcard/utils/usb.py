@@ -8,6 +8,8 @@ from pathlib import Path
 import re
 import platform
 from sdcard.config import Config
+from sdcard.utils.cards import get_available_cards
+
 def get_usb_device_info(usb_path):
     """Get detailed info including both negotiated and theoretical speeds"""
     try:
