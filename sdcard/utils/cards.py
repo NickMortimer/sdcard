@@ -114,12 +114,11 @@ def register_cards(config,card_path,card_number,overwrite,dry_run: bool):
                 if card_number==0:
                     raw_data = yaml.safe_load(file_path.read_text(encoding='utf-8'))
                     card_number = raw_data['card_number'] if 'card_number' in raw_data else 0
-                    card_number = int(card_number)
             else:
                 typer.echo(f"Error SDCard already initialise {file_path}")
                 return
         if card_number==0:
-            card_number = typer.prompt(f"Card number [{str(file_path)}]", type=int, default=1)    
+            card_number = typer.prompt(f"Card number [{str(file_path)}]", type=str, default='1')    
         env = Environment(loader = FileSystemLoader(config.get_path('CATALOG_DIR')),   trim_blocks=True, lstrip_blocks=True)
         template = env.get_template(config.get_path('import_template_path').name)
         fill = {"instrumentPath" : Path.cwd(), "instrument" : 'gopro_bruv',
