@@ -103,7 +103,7 @@ def list_sdcards(format_type,maxcardsize=512):
                 result.append(i.mountpoint)
     return result
 
-def make_yml(file_path,card_number=0,overwrite=False):
+def make_yml(file_path, config, card_number=0, overwrite=False):
     if file_path.exists():
         if (overwrite):
             if card_number==0:
@@ -134,9 +134,9 @@ def register_cards(config,card_path,card_number,overwrite,dry_run: bool):
     # Set dry run log string to prepend to logging
     dry_run_log_string = "DRY_RUN - " if dry_run else ""    
     if isinstance(card_path,list):
-        [make_yml(Path(path)/ "import.yml",cardno,overwrite) for path,cardno in zip(card_path,card_number)]
+        [make_yml(Path(path)/ "import.yml", config, cardno, overwrite) for path,cardno in zip(card_path,card_number)]
     else:
-        make_yml(Path(card_path) /"import.yml",card_number,overwrite)
+        make_yml(Path(card_path) /"import.yml", config, card_number, overwrite)
 
 def import_cards(config,card_path:Path,copy,move,find,file_extension,dry_run: bool,format_card=False):
     """
@@ -200,5 +200,5 @@ def import_cards(config,card_path:Path,copy,move,find,file_extension,dry_run: bo
                     if not dry_run:
                         process = subprocess.Popen(shlex.split(command))
                         process.wait()
-                make_yml(Path(card) / "import.yml", importdetails['card_number'], overwrite=True)
+                make_yml(Path(card) / "import.yml", config, importdetails['card_number'], overwrite=True)
 
