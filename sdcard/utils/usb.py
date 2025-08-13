@@ -345,119 +345,27 @@ def detect_thunderbolt_upstream_capacity():
 
 def analyze_destination_capacity(usb_cards, dest_write_speed_override=None, global_destination=None):
     """Analyze destination drive capacity and identify potential bottlenecks"""
-    try:
-        import yaml
+    if platform.system() == "Windows":
+        # Windows: build a structure similar to Linux using available info from usb_cards DataFrame
         destinations = {}
-        
-        # Filter out destination path from USB cards if it exists
-        filtered_usb_cards = usb_cards.copy()
-        if global_destination:
-            # Find the mount point for the global destination first
-            result = subprocess.run(['df', global_destination], capture_output=True, text=True)
-            destination_mount = None
-            if result.returncode == 0:
-                lines = result.stdout.strip().split('\n')
-                if len(lines) > 1:
-                    destination_mount = lines[1].split()[-1]
-            
-            # Remove any cards that are mounted at the destination mount point
-            if destination_mount:
-                filtered_usb_cards = usb_cards[usb_cards['mountpoint'] != destination_mount].copy()
-        
-        for _, card in filtered_usb_cards.iterrows():
-            # Skip destination drives in analysis
-            if card.get('device_type') == 'destination':
-                continue
-                
-            mountpoint = card['mountpoint']
-            dest_path = None
-            
-            # Use global destination if provided, otherwise try to read from card's import.yml
-            if global_destination:
-                dest_path = global_destination
-            else:
-                # Try to find import.yml to get destination
-                import_yml_path = Path(mountpoint) / "import.yml"
-                if import_yml_path.exists():
-                    try:
-                        with open(import_yml_path, 'r') as f:
-                            config = yaml.safe_load(f)
-                        dest_path = config.get('destination_path', '/unknown')
-                    except Exception:
-                        dest_path = '/unknown'
-                else:
-                    dest_path = '/unknown'
-            
-            if dest_path:
-                # Find the mount point for this destination path
-                result = subprocess.run(['df', dest_path], capture_output=True, text=True)
-                if result.returncode == 0:
-                    lines = result.stdout.strip().split('\n')
-                    if len(lines) > 1:
-                        dest_device = lines[1].split()[0]
-                        dest_mount = lines[1].split()[-1]
-                        
-                        if dest_mount not in destinations:
-                            destinations[dest_mount] = {
-                                'device': dest_device,
-                                'mount_point': dest_mount,
-                                'destination_path': dest_path,
-                                'cards': [],
-                                'total_demand': 0,
-                                'drive_type': 'unknown',
-                                'estimated_write_speed': 0,
-                                'speed_override': dest_write_speed_override is not None,  # Fixed typo
-                                'using_global_config': global_destination is not None
-                            }
-                        
-                        destinations[dest_mount]['cards'].append(card)
-                        destinations[dest_mount]['total_demand'] += card.get('actual_transfer_rate', 0)
-        
-        # Analyze each destination drive
-        for dest_mount, dest_info in destinations.items():
-            try:
-                # Use override speed if provided
-                if dest_write_speed_override is not None:
-                    dest_info['estimated_write_speed'] = dest_write_speed_override
-                    dest_info['drive_type'] = f"User Override ({dest_write_speed_override} MB/s)"
-                else:
-                    # Detect drive type and estimate write speed with minimum 200 MB/s
-                    device = dest_info['device']
-                    
-                    if '/dev/nvme' in device:
-                        dest_info['drive_type'] = 'NVMe SSD'
-                        dest_info['estimated_write_speed'] = max(2000, 200)  # At least 200 MB/s
-                    elif any(x in device for x in ['/dev/sd', '/dev/hd']):
-                        device_name = device.split('/')[-1].rstrip('0123456789')
-                        try:
-                            with open(f'/sys/block/{device_name}/queue/rotational', 'r') as f:
-                                is_rotational = f.read().strip() == '1'
-                            
-                            if is_rotational:
-                                dest_info['drive_type'] = 'HDD'
-                                dest_info['estimated_write_speed'] = max(150, 200)  # At least 200 MB/s
-                            else:
-                                dest_info['drive_type'] = 'SATA SSD'
-                                dest_info['estimated_write_speed'] = max(500, 200)  # At least 200 MB/s
-                        except:
-                            dest_info['drive_type'] = 'Unknown SATA'
-                            dest_info['estimated_write_speed'] = 200  # Minimum write speed
-                    else:
-                        dest_info['drive_type'] = 'Unknown'
-                        dest_info['estimated_write_speed'] = 200  # Minimum write speed
-                
-                # Check for potential saturation
-                utilization = (dest_info['total_demand'] / dest_info['estimated_write_speed'] * 100) if dest_info['estimated_write_speed'] > 0 else 0
-                dest_info['utilization_percentage'] = utilization
-                dest_info['is_saturated'] = utilization > 80
-                
-            except Exception:
-                pass
-        
+        # Find all cards marked as destination
+        dest_cards = usb_cards[usb_cards.get('device_type') == 'destination'] if 'device_type' in usb_cards else pd.DataFrame()
+        for _, card in dest_cards.iterrows():
+            mountpoint = card.get('mountpoint', '')
+            destinations[mountpoint] = {
+                'drive_type': 'destination',
+                'device': card.get('name', ''),
+                'destination_path': mountpoint,
+                'using_global_config': True,
+                'speed_override': dest_write_speed_override is not None,
+                'estimated_write_speed': dest_write_speed_override or 200.0,
+                'total_demand': card.get('actual_transfer_rate', 0),
+                'utilization_percentage': 0.0,
+                'is_saturated': False,
+                'cards': [card],
+            }
         return destinations
-        
-    except Exception:
-        return {}
+    # ...existing Linux code...
 
 def get_complete_usb_card_info(destination_path=None, card_size=512, format_type='exfat'):
     """Get SD cards with USB hierarchy information, filtering by size and format, plus destination mount"""
