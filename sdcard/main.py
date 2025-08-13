@@ -312,19 +312,19 @@ def import_command(
         find: bool = typer.Option(True, help="import to the same hash"),
         card_size:int = typer.Option(512, help="maximum card size"),
         format_type:str = typer.Option('exfat', help="Card format type"),
-        extra: list[str] = typer.Option([], help="Extra key-value pass-through arguments."),
         dry_run: bool = typer.Option(False, help="Execute the command and print logging to the terminal, but do not change any files."),
         file_extension: str = typer.Option("MP4", help="extension to catalog"),
-):
+        format_card: bool = typer.Option(False, help="Format drive after import and move")
+    ):
     """
-    Import SD cards to working directorypip
-    """ 
+    Import SD cards to working directory
+    """
     from sdcard.utils.cards import list_sdcards
     from sdcard.utils.cards import import_cards
     config = Config(config_path)
     if all and (not card_path ):
         card_path = list_sdcards(format_type,card_size)
-    import_cards(config=config,card_path=card_path,copy=copy,move=move,find=find,dry_run=dry_run,file_extension=file_extension)
+    import_cards(config=config,card_path=card_path,copy=copy,move=move,find=find,dry_run=dry_run,file_extension=file_extension,format_card=format_card)
 
 @sdcard.command('web')
 def web():

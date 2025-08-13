@@ -36,11 +36,12 @@
             "justMyCode": true,
             "args":["register","--all","--cardsize","256","--overwrite",]
         },        {
-            "name": "sdcard copy",
+            "name": "import copy",
             "type": "python",
             "request": "launch",
             "program": "/home/mor582/code/sdcard/sdcard/main.py",
-            "cwd": "/mnt/datasets/fielddata0/fielddata0/LI2024-01",
+            "cwd": "/media/mor582/ASHMORE_02/LI2024-01",
+            //"cwd": "/mnt/datasets/fielddata0/fielddata0/LI2024-01",
             "console": "integratedTerminal",
             "justMyCode": true,
             "args":["import","--all","--cardsize","256","--copy"]
