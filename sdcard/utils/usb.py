@@ -461,6 +461,108 @@ def analyze_destination_capacity(usb_cards, dest_write_speed_override=None, glob
 
 def get_complete_usb_card_info(destination_path=None, card_size=512, format_type='exfat'):
     """Get SD cards with USB hierarchy information, filtering by size and format, plus destination mount"""
+    if platform.system() == "Windows":
+        try:
+            import wmi
+            from pywinusb import hid
+            c = wmi.WMI()
+            # Get all removable drives (SD cards, USB sticks, etc.)
+            drives = [d for d in c.Win32_DiskDrive() if d.MediaType and ("Removable" in d.MediaType or d.InterfaceType == "USB")]
+            # Map physical drives to logical disks (mountpoints)
+            partitions = {p.DeviceID: p for p in c.Win32_DiskPartition()}
+            logical_disks = {ld.DeviceID: ld for ld in c.Win32_LogicalDisk()}
+            # Build a lookup of USB devices by serial number (using pywinusb)
+            usb_devices = hid.HidDeviceFilter().get_devices()
+            pywinusb_lookup = {}
+            for dev in usb_devices:
+                try:
+                    serial = dev.serial_number
+                    vendor_id = dev.vendor_id
+                    product_id = dev.product_id
+                    pywinusb_lookup[(vendor_id, product_id, serial)] = dev
+                except Exception:
+                    continue
+            usb_info = []
+            for drive in drives:
+                # Find partitions for this drive
+                drive_partitions = [p for p in c.Win32_DiskPartition() if p.DiskIndex == drive.Index]
+                for part in drive_partitions:
+                    # Find logical disks for this partition
+                    part_logical = [ld for ld in c.Win32_LogicalDiskToPartition() if ld.Antecedent.split('=')[1].strip('"') == part.DeviceID]
+                    for mapping in part_logical:
+                        logical_id = mapping.Dependent.split('=')[1].strip('"')
+                        logical = logical_disks.get(logical_id)
+                        if not logical:
+                            continue
+                        # Filter by filesystem type and size
+                        if logical.FileSystem and logical.FileSystem.lower() == format_type.lower():
+                            size_gb = float(logical.Size) / (1024 ** 3) if logical.Size else 0
+                            if size_gb <= card_size:
+                                # Try to get vendor_id, product_id, serial for pywinusb lookup
+                                vendor_id = None
+                                product_id = None
+                                serial = None
+                                try:
+                                    vendor_id = int(drive.PNPDeviceID.split('VID_')[1][:4], 16)
+                                    product_id = int(drive.PNPDeviceID.split('PID_')[1][:4], 16)
+                                    serial = drive.SerialNumber if hasattr(drive, 'SerialNumber') else None
+                                except Exception:
+                                    pass
+                                pywinusb_dev = pywinusb_lookup.get((vendor_id, product_id, serial))
+                                # pywinusb does not provide negotiated speed, but we can at least show USB version if available
+                                reader_speed = None
+                                reader_speed_mbps = None
+                                if pywinusb_dev:
+                                    try:
+                                        # pywinusb does not expose speed, but we can show USB version
+                                        usb_version = pywinusb_dev.device_release_number
+                                        if usb_version >= 0x0300:
+                                            reader_speed = 'SuperSpeed'
+                                            reader_speed_mbps = 5000
+                                        elif usb_version >= 0x0200:
+                                            reader_speed = 'High Speed'
+                                            reader_speed_mbps = 480
+                                        elif usb_version >= 0x0110:
+                                            reader_speed = 'Full Speed'
+                                            reader_speed_mbps = 12
+                                        else:
+                                            reader_speed = 'Low Speed'
+                                            reader_speed_mbps = 1.5
+                                    except Exception:
+                                        pass
+                                card_info = {
+                                    'name': drive.DeviceID,
+                                    'mountpoint': logical.DeviceID,
+                                    'size': f"{size_gb:.1f}G",
+                                    'fstype': logical.FileSystem,
+                                    'device_type': 'sd_card',
+                                    'reader_manufacturer': getattr(drive, 'Manufacturer', None),
+                                    'reader_product': getattr(drive, 'Model', None),
+                                    'reader_speed': reader_speed,
+                                    'reader_speed_mbps': reader_speed_mbps,
+                                    'actual_transfer_rate': None,
+                                    'thunderbolt_connected': None,
+                                    'thunderbolt_info': None,
+                                }
+                                usb_info.append(card_info)
+            # Available ports: list USB hubs
+            available_ports = []
+            for hub in c.Win32_USBHub():
+                available_ports.append({
+                    'usb_path': hub.DeviceID,
+                    'manufacturer': getattr(hub, 'Manufacturer', 'Unknown'),
+                    'product': getattr(hub, 'Name', 'Unknown'),
+                    'speed_name': None,
+                    'speed_mbps': None,
+                    'device_class': None
+                })
+            return pd.DataFrame(usb_info), available_ports
+        except ImportError:
+            print("wmi or pywinusb module not installed. Please install wmi and pywinusb for Windows support.")
+            return pd.DataFrame([]), []
+        except Exception as e:
+            print(f"Error in Windows USB info: {e}")
+            return pd.DataFrame([]), []
     # Get mounted devices
     mountpoints = pd.DataFrame(json.loads(subprocess.getoutput('lsblk -J -o NAME,SIZE,FSTYPE,TYPE,MOUNTPOINT'))['blockdevices'])
     mountpoints = mountpoints[~mountpoints.children.isna()]
@@ -634,31 +736,15 @@ def get_probe_cards_info(config_path, format_type, card_size, max_sd_speed):
     - thunderbolt_bandwidth: dict or None
     - destination_path: str or Path (Linux only, None on Windows)
     """
-    if platform.system() == "Linux":
-        config = Config(config_path)
-        destination_path = config.get_path('card_store')
-        usb_cards, available_ports = get_complete_usb_card_info(destination_path, card_size, format_type)
-        thunderbolt_bandwidth = detect_thunderbolt_upstream_capacity()
-        # Cap transfer rates
-        for i, row in usb_cards.iterrows():
-            usb_cards.at[i, 'actual_transfer_rate'] = min(row['actual_transfer_rate'], max_sd_speed)
-            usb_cards.at[i, 'realistic_single_speed'] = min(row['actual_transfer_rate'], max_sd_speed)
-        return usb_cards, available_ports, thunderbolt_bandwidth, destination_path
-    else:
-        # Windows: build a DataFrame with the same columns as Linux
-        drives_info = get_available_cards(format_type, card_size)
-        # Convert to DataFrame and add missing columns for parity
-        usb_cards = pd.DataFrame(drives_info)
-        if not usb_cards.empty:
-            for col in ['actual_transfer_rate', 'realistic_single_speed', 'device_type', 'reader_manufacturer', 'reader_product', 'reader_speed', 'reader_speed_mbps', 'thunderbolt_connected', 'thunderbolt_info', 'fstype', 'name', 'size', 'mountpoint']:
-                if col not in usb_cards:
-                    usb_cards[col] = None
-            usb_cards['actual_transfer_rate'] = max_sd_speed
-            usb_cards['realistic_single_speed'] = max_sd_speed
-        available_ports = []
-        thunderbolt_bandwidth = None  # Not implemented for Windows
-        destination_path = None
-        return usb_cards, available_ports, thunderbolt_bandwidth, destination_path
+    config = Config(config_path)
+    destination_path = config.get_path('card_store')
+    usb_cards, available_ports = get_complete_usb_card_info(destination_path, card_size, format_type)
+    thunderbolt_bandwidth = detect_thunderbolt_upstream_capacity()
+    # Cap transfer rates
+    for i, row in usb_cards.iterrows():
+        usb_cards.at[i, 'actual_transfer_rate'] = min(row['actual_transfer_rate'], max_sd_speed)
+        usb_cards.at[i, 'realistic_single_speed'] = min(row['actual_transfer_rate'], max_sd_speed)
+    return usb_cards, available_ports, thunderbolt_bandwidth, destination_path
 
 def get_probe_destinations_info(usb_cards, dest_write_speed, destination_path):
     """
