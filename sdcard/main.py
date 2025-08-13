@@ -20,13 +20,16 @@ from sdcard.utils.usb import (
     detect_thunderbolt_upstream_capacity,
     analyze_destination_capacity,
     calculate_real_transfer_rate,
-    get_usb_hierarchy_info
+    get_usb_hierarchy_info,
+    get_probe_destinations_info,
+    get_probe_cards_info
 )
 from sdcard.utils.cards import get_available_cards
 from collections import defaultdict
 import pandas as pd
 from typer.testing import CliRunner
 import typer
+import shlex
 
 
 __author__ = "GoPro BRUV Development Team"
@@ -48,64 +51,7 @@ sdcard = typer.Typer(
     no_args_is_help=True,
 )
 
-def get_probe_cards_info(config_path, format_type, card_size, max_sd_speed):
-    """
-    Returns (usb_cards_df, available_ports, thunderbolt_bandwidth, destination_path)
-    - usb_cards_df: DataFrame with all card info (same columns on both OS)
-    - available_ports: list/dict of available USB ports (if needed)
-    - thunderbolt_bandwidth: dict or None
-    - destination_path: str or Path (Linux only, None on Windows)
-    """
-    if platform.system() == "Linux":
-        config = Config(config_path)
-        destination_path = config.get_path('card_store')
-        usb_cards, available_ports = get_complete_usb_card_info(destination_path, card_size, format_type)
-        thunderbolt_bandwidth = detect_thunderbolt_upstream_capacity()
-        # Cap transfer rates
-        for i, row in usb_cards.iterrows():
-            usb_cards.at[i, 'actual_transfer_rate'] = min(row['actual_transfer_rate'], max_sd_speed)
-            usb_cards.at[i, 'realistic_single_speed'] = min(row['actual_transfer_rate'], max_sd_speed)
-        return usb_cards, available_ports, thunderbolt_bandwidth, destination_path
-    else:
-        # Windows: build a DataFrame with the same columns as Linux
-        drives_info = get_available_cards(format_type, card_size)
-        # Convert to DataFrame and add missing columns for parity
-        usb_cards = pd.DataFrame(drives_info)
-        if not usb_cards.empty:
-            for col in ['actual_transfer_rate', 'realistic_single_speed', 'device_type', 'reader_manufacturer', 'reader_product', 'reader_speed', 'reader_speed_mbps', 'thunderbolt_connected', 'thunderbolt_info', 'fstype', 'name', 'size', 'mountpoint']:
-                if col not in usb_cards:
-                    usb_cards[col] = None
-            usb_cards['actual_transfer_rate'] = max_sd_speed
-            usb_cards['realistic_single_speed'] = max_sd_speed
-        available_ports = []
-        thunderbolt_bandwidth = None  # Not implemented for Windows
-        destination_path = None
-        return usb_cards, available_ports, thunderbolt_bandwidth, destination_path
 
-def get_probe_destinations_info(usb_cards, dest_write_speed, destination_path):
-    """
-    Returns a dict of destination drive analysis (same keys on both OS)
-    """
-    if platform.system() == "Linux":
-        return analyze_destination_capacity(usb_cards, dest_write_speed, destination_path)
-    else:
-        # Windows: fake a similar structure for parity
-        destinations = {}
-        for _, card in usb_cards.iterrows():
-            if card.get('device_type') == 'destination':
-                destinations[card['mountpoint']] = {
-                    'drive_type': 'destination',
-                    'device': card.get('name', ''),
-                    'destination_path': card.get('mountpoint', ''),
-                    'using_global_config': True,
-                    'speed_override': dest_write_speed is not None,
-                    'estimated_write_speed': dest_write_speed or 200.0,
-                    'total_demand': card.get('actual_transfer_rate', 0),
-                    'utilization_percentage': 0.0,
-                    'is_saturated': False,
-                    'cards': [card],
-                }
-        return destinations
 
 @sdcard.command('probe')
 def probe(config_path: str = typer.Option(None, help="Root path to MarImBA collection."),
@@ -169,7 +115,29 @@ def probe(config_path: str = typer.Option(None, help="Root path to MarImBA colle
         print(f"  📊 Generation: {thunderbolt_bandwidth.get('generation', 'Unknown')}")
         print(f"  💾 Max Speed: {thunderbolt_bandwidth.get('max_speed_gbps', 0):.0f} Gb/s")
         print(f"  🔬 Practical USB Capacity: {thunderbolt_bandwidth.get('practical_usb_capacity_mbps', 0):.1f} MB/s")
-        
+        saturation_info = None
+        if thunderbolt_bandwidth:
+            thunderbolt_devices = []
+            total_thunderbolt_demand = 0
+            
+            for _, card in usb_cards.iterrows():
+                if card.get('thunderbolt_connected', False):
+                    thunderbolt_devices.append(card)
+                    realistic_speed = min(card.get('actual_transfer_rate', 0), max_sd_speed)
+                    total_thunderbolt_demand += realistic_speed
+            
+            upstream_capacity = thunderbolt_bandwidth.get('practical_usb_capacity_mbps', 0)
+            utilization_percentage = (total_thunderbolt_demand / upstream_capacity * 100) if upstream_capacity > 0 else 0
+            
+            saturation_info = {
+                'thunderbolt_devices': len(thunderbolt_devices),
+                'total_demand_mbps': total_thunderbolt_demand,
+                'upstream_capacity_mbps': upstream_capacity,
+                'utilization_percentage': utilization_percentage,
+                'is_saturated': utilization_percentage > 90,
+                'headroom_mbps': upstream_capacity - total_thunderbolt_demand,
+                'devices': thunderbolt_devices
+            }
         if saturation_info and saturation_info['thunderbolt_devices'] > 0:
             saturation_icon = "🔴" if saturation_info['is_saturated'] else "🟢"
             print(f"\n📈 Bandwidth Utilization:")
@@ -182,6 +150,7 @@ def probe(config_path: str = typer.Option(None, help="Root path to MarImBA colle
     # Show card analysis
     print("📱 SD Card Analysis:")
     print("=" * 60)
+
     
     cards_without_config = []
     
@@ -208,7 +177,6 @@ def probe(config_path: str = typer.Option(None, help="Root path to MarImBA colle
             print(f"    💾 Device: {card['name']}")
             print(f"    📂 Filesystem: {card['fstype']}")
             print(f"    🎯 This is where SD card content will be stored")
-            
             # Add USB speed information for destination drive
             if card.get('reader_manufacturer'):
                 print(f"    📖 Connection: {card['reader_manufacturer']} {card['reader_product']}")
@@ -230,7 +198,7 @@ def probe(config_path: str = typer.Option(None, help="Root path to MarImBA colle
         # Check for import.yml
         mountpoint = card['mountpoint']
         has_import_yml = (Path(mountpoint) / "import.yml").exists()
-        
+        card['card_number'] = get_card_number_from_import_yml(Path(mountpoint) / "import.yml")
         if not has_import_yml:
             cards_without_config.append(mountpoint)
         
@@ -259,7 +227,7 @@ def probe(config_path: str = typer.Option(None, help="Root path to MarImBA colle
         config_icon = "❌" if not has_import_yml else ""
         dual_slot_icon = "👥" if is_dual_slot else ""
         
-        print(f"{icon} {tb_icon} {speed_limited_icon} {config_icon} {dual_slot_icon} {card['mountpoint']} ({card['size']})")
+        print(f"{icon} {tb_icon} {speed_limited_icon} {config_icon} {dual_slot_icon} {card['mountpoint']} ({card['size']}) #{card['card_number']:03d}")
         
         if not has_import_yml:
             print(f"    ❌ WARNING: Missing import.yml configuration file!")
@@ -272,7 +240,9 @@ def probe(config_path: str = typer.Option(None, help="Root path to MarImBA colle
             print(f"    ⚡ Thunderbolt: {card.get('thunderbolt_info', 'Connected')}")
         else:
             print(f"    🔌 Connection: {card.get('thunderbolt_info', 'Standard USB')}")
-        
+        if card.get('hub_manufacturer'):
+            print(f"    📖 Connection: {card['hub_manufacturer']} {card['reader_product']}")
+            print(f"       USB Speed: {card['hub_speed']} ({card['hub_speed_mbps']} Mbps)")
         if card.get('reader_manufacturer'):
             print(f"    📖 Reader: {card['reader_manufacturer']} {card['reader_product']}")
             print(f"       USB Speed: {card['reader_speed']} ({card['reader_speed_mbps']} Mbps)")
@@ -362,7 +332,7 @@ def web():
     from sdcard.web.app import run_server
     run_server()
 
-@sdcard.command('all')
+@sdcard.command('turbo')
 def import_all(config_path: str = typer.Option(None, help="Root path to MarImBA collection."),
          max_processes:int = typer.Option(4, help="Number of concurrent transfers"),
          format_type:str = typer.Option('exfat', help="Card format type"),
@@ -444,6 +414,8 @@ def import_all(config_path: str = typer.Option(None, help="Root path to MarImBA 
             
             hierarchy = get_usb_hierarchy_info(card['name'])
             if (Path(card['mountpoint']) / "import.yml").exists():
+                raw_data = yaml.safe_load(file_path.read_text(encoding='utf-8'))
+                card['card_number'] = raw_data['card_number'] if 'card_number' in raw_data else 0
                 if 'card_reader' in hierarchy:
                     reader_path = hierarchy['card_reader'].get('usb_path', 'unknown')
                     reader_id = f"{reader_id}_{reader_path}"

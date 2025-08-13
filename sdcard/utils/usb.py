@@ -6,7 +6,8 @@ import os
 import shlex
 from pathlib import Path
 import re
-
+import platform
+from sdcard.config import Config
 def get_usb_device_info(usb_path):
     """Get detailed info including both negotiated and theoretical speeds"""
     try:
@@ -621,3 +622,63 @@ def get_complete_usb_card_info(destination_path=None, card_size=512, format_type
         usb_info.append(dest_info)
     
     return pd.DataFrame(usb_info), available_ports
+
+
+def get_probe_cards_info(config_path, format_type, card_size, max_sd_speed):
+    """
+    Returns (usb_cards_df, available_ports, thunderbolt_bandwidth, destination_path)
+    - usb_cards_df: DataFrame with all card info (same columns on both OS)
+    - available_ports: list/dict of available USB ports (if needed)
+    - thunderbolt_bandwidth: dict or None
+    - destination_path: str or Path (Linux only, None on Windows)
+    """
+    if platform.system() == "Linux":
+        config = Config(config_path)
+        destination_path = config.get_path('card_store')
+        usb_cards, available_ports = get_complete_usb_card_info(destination_path, card_size, format_type)
+        thunderbolt_bandwidth = detect_thunderbolt_upstream_capacity()
+        # Cap transfer rates
+        for i, row in usb_cards.iterrows():
+            usb_cards.at[i, 'actual_transfer_rate'] = min(row['actual_transfer_rate'], max_sd_speed)
+            usb_cards.at[i, 'realistic_single_speed'] = min(row['actual_transfer_rate'], max_sd_speed)
+        return usb_cards, available_ports, thunderbolt_bandwidth, destination_path
+    else:
+        # Windows: build a DataFrame with the same columns as Linux
+        drives_info = get_available_cards(format_type, card_size)
+        # Convert to DataFrame and add missing columns for parity
+        usb_cards = pd.DataFrame(drives_info)
+        if not usb_cards.empty:
+            for col in ['actual_transfer_rate', 'realistic_single_speed', 'device_type', 'reader_manufacturer', 'reader_product', 'reader_speed', 'reader_speed_mbps', 'thunderbolt_connected', 'thunderbolt_info', 'fstype', 'name', 'size', 'mountpoint']:
+                if col not in usb_cards:
+                    usb_cards[col] = None
+            usb_cards['actual_transfer_rate'] = max_sd_speed
+            usb_cards['realistic_single_speed'] = max_sd_speed
+        available_ports = []
+        thunderbolt_bandwidth = None  # Not implemented for Windows
+        destination_path = None
+        return usb_cards, available_ports, thunderbolt_bandwidth, destination_path
+
+def get_probe_destinations_info(usb_cards, dest_write_speed, destination_path):
+    """
+    Returns a dict of destination drive analysis (same keys on both OS)
+    """
+    if platform.system() == "Linux":
+        return analyze_destination_capacity(usb_cards, dest_write_speed, destination_path)
+    else:
+        # Windows: fake a similar structure for parity
+        destinations = {}
+        for _, card in usb_cards.iterrows():
+            if card.get('device_type') == 'destination':
+                destinations[card['mountpoint']] = {
+                    'drive_type': 'destination',
+                    'device': card.get('name', ''),
+                    'destination_path': card.get('mountpoint', ''),
+                    'using_global_config': True,
+                    'speed_override': dest_write_speed is not None,
+                    'estimated_write_speed': dest_write_speed or 200.0,
+                    'total_demand': card.get('actual_transfer_rate', 0),
+                    'utilization_percentage': 0.0,
+                    'is_saturated': False,
+                    'cards': [card],
+                }
+        return destinations

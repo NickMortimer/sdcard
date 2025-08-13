@@ -108,7 +108,7 @@ def register_cards(config,card_path,card_number,overwrite,dry_run: bool):
     Implementation of the MarImBA initialise command for the BRUVS
     """
 
-    def make_yml(file_path,card_number=0):
+    def make_yml(file_path,card_number=0,overwrite=False):
         if file_path.exists():
             if (overwrite):
                 if card_number==0:
@@ -133,12 +133,11 @@ def register_cards(config,card_path,card_number,overwrite,dry_run: bool):
     # Set dry run log string to prepend to logging
     dry_run_log_string = "DRY_RUN - " if dry_run else ""    
     if isinstance(card_path,list):
-    
-        [make_yml(Path(path)/ "import.yml",cardno) for path,cardno in zip(card_path,card_number)]
+        [make_yml(Path(path)/ "import.yml",cardno,overwrite) for path,cardno in zip(card_path,card_number)]
     else:
-        make_yml(Path(card_path) /"import.yml",card_number)
+        make_yml(Path(card_path) /"import.yml",card_number,overwrite)
 
-def import_cards(config,card_path:Path,copy,move,find,file_extension,dry_run: bool):
+def import_cards(config,card_path:Path,copy,move,find,file_extension,dry_run: bool,format_card=False):
     """
     Implementation of the MarImBA initalise command for the BRUVS
     """
@@ -180,4 +179,19 @@ def import_cards(config,card_path:Path,copy,move,find,file_extension,dry_run: bo
                 destination.mkdir(exist_ok=True,parents=True)
                 process = subprocess.Popen(shlex.split(command))
                 process.wait()
+                ## check if drive is empty less than 1Gb
+                if psutil.disk_usage(card).used < 1 * 1024**3:
+                    #format the drive on windows and linux
+                    if platform.system() == "Windows":
+                        command = f"format {card} /FS:exFAT /Q /Y"
+                    else:
+                        command = f"mkfs.exfat {card}"
+                    command = command.replace('\\','/')
+                    logging.info(f'{dry_run_log_string}  Deleting empty drive {card}')
+                    command = f"rmdir {card}"
+                    command = command.replace('\\','/')
+                    logging.info(f'{dry_run_log_string}  {command}')
+                    if not dry_run:
+                        process = subprocess.Popen(shlex.split(command))
+                        process.wait()
 

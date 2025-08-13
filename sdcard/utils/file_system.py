@@ -26,3 +26,6 @@ def list_sdcards(format_type,maxcardsize=512):
                 result.append(i.mountpoint)
     return result
 
+
+
+
