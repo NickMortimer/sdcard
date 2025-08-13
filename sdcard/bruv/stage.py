@@ -30,13 +30,17 @@ format_type = 'exfat'
 
 def task_create_json():
         config = Config(get_var('config',None))
+        if platform.system() == 'Windows':
+            exiftool_path = config.current_path / 'bin' /'exiftool.exe'
+        else:
+            exiftool_path = 'exiftool'
         for path in config.get_path('card_store').rglob('100GOPRO'):
             file_dep = list(path.glob("*.MP4"))
             if len(file_dep)>0:
                 target  = path / config.data['exifname']
-                command = f'exiftool -api largefilesupport=1 -m -u -q -q -n -CameraSerialNumber -CreateDate -TrackCreateDate -OffsetTimeOriginal -SourceFile -Duration -Rate -VideoFrameRate -Model -FileSize -FieldOfView -json -ext MP4 {path} > {target} || :'
+                command = f'{exiftool_path} -api largefilesupport=1 -m -u -q -q -n -CameraSerialNumber -CreateDate -TrackCreateDate -OffsetTimeOriginal -SourceFile -Duration -Rate -VideoFrameRate -Model -FileSize -FieldOfView -json -ext MP4 {path} > {target} || :'
                 if file_dep:
-                     yield { 
+                     yield {  
                         'name':path,
                         'file_dep':file_dep,
                         'actions':[command],
