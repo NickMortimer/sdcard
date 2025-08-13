@@ -103,32 +103,34 @@ def list_sdcards(format_type,maxcardsize=512):
                 result.append(i.mountpoint)
     return result
 
+def make_yml(file_path,card_number=0,overwrite=False):
+    if file_path.exists():
+        if (overwrite):
+            if card_number==0:
+                raw_data = yaml.safe_load(file_path.read_text(encoding='utf-8'))
+                card_number = raw_data['card_number'] if 'card_number' in raw_data else 0
+        else:
+            typer.echo(f"Error SDCard already initialise {file_path}")
+            return
+    if card_number==0:
+        card_number = typer.prompt(f"Card number [{str(file_path)}]", type=str, default='1')    
+    env = Environment(loader = FileSystemLoader(config.get_path('CATALOG_DIR')),   trim_blocks=True, lstrip_blocks=True)
+    template = env.get_template(config.get_path('import_template_path').name)
+    fill = {"instrumentPath" : Path.cwd(), "instrument" : 'gopro_bruv',
+            "import_date" : f"{datetime.now():%Y-%m-%d}",
+            "import_token" : str(uuid.uuid4())[0:8],
+            "card_number" : card_number}
+    #self.logger.info(f'{dry_run_log_string}Making import file "{file_path}"')
+    if not dry_run:
+        with open(file_path, "w") as file:
+            file.write(template.render(fill))
+
 def register_cards(config,card_path,card_number,overwrite,dry_run: bool):
     """
     Implementation of the MarImBA initialise command for the BRUVS
     """
 
-    def make_yml(file_path,card_number=0,overwrite=False):
-        if file_path.exists():
-            if (overwrite):
-                if card_number==0:
-                    raw_data = yaml.safe_load(file_path.read_text(encoding='utf-8'))
-                    card_number = raw_data['card_number'] if 'card_number' in raw_data else 0
-            else:
-                typer.echo(f"Error SDCard already initialise {file_path}")
-                return
-        if card_number==0:
-            card_number = typer.prompt(f"Card number [{str(file_path)}]", type=str, default='1')    
-        env = Environment(loader = FileSystemLoader(config.get_path('CATALOG_DIR')),   trim_blocks=True, lstrip_blocks=True)
-        template = env.get_template(config.get_path('import_template_path').name)
-        fill = {"instrumentPath" : Path.cwd(), "instrument" : 'gopro_bruv',
-                "import_date" : f"{datetime.now():%Y-%m-%d}",
-                "import_token" : str(uuid.uuid4())[0:8],
-                "card_number" : card_number}
-        #self.logger.info(f'{dry_run_log_string}Making import file "{file_path}"')
-        if not dry_run:
-            with open(file_path, "w") as file:
-                file.write(template.render(fill))
+
     # Set dry run log string to prepend to logging
     dry_run_log_string = "DRY_RUN - " if dry_run else ""    
     if isinstance(card_path,list):
@@ -156,13 +158,17 @@ def import_cards(config,card_path:Path,copy,move,find,file_extension,dry_run: bo
         importdetails["import_date"] = f"{datetime.now():%Y-%m-%d}"
         # Find all matching paths
         matches = list(Path(config.get_path('card_store')).rglob(f"*{importdetails['import_token']}*"))
+        if platform.system() == "Windows":
+            rclone_path = config.catalog_dir / 'bin' / 'rclone.exe'
+        else:
+            rclone_path = 'rclone'
 
         # Get destination path - either newest match or create new from template
         destination = (max(matches) if matches 
                     else Path(config.data['import_path_template'].format(**importdetails)))
         if copy:
             logging.info(f'{dry_run_log_string}  Copy  {card} --> {destination}')
-            command =f"rclone copy {Path(card).resolve()} {destination.resolve()} --progress --low-level-retries 1 "
+            command =f"{rclone_path} copy {Path(card).resolve()} {destination.resolve()} --progress --low-level-retries 1 "
             logging.info(f'running {command}')
             command = command.replace('\\','/')
             logging.info(f'{dry_run_log_string}  {command}')
@@ -171,7 +177,7 @@ def import_cards(config,card_path:Path,copy,move,find,file_extension,dry_run: bo
                 process = subprocess.Popen(shlex.split(command))
                 process.wait()
         if move:
-            command =f"rclone move {card} {destination} --progress --delete-empty-src-dirs"
+            command =f"{rclone_path} move {card} {destination} --progress --delete-empty-src-dirs"
             command = command.replace('\\','/')
             logging.info(f'{dry_run_log_string}  {command}')
             if not dry_run:
@@ -179,7 +185,8 @@ def import_cards(config,card_path:Path,copy,move,find,file_extension,dry_run: bo
                 process = subprocess.Popen(shlex.split(command))
                 process.wait()
                 ## check if drive is empty less than 1Gb
-                if psutil.disk_usage(card).used < 1 * 1024**3:
+
+                if format_card and (psutil.disk_usage(card).used < 1 * 1024**3):  # Less than 1 GB used
                     #format the drive on windows and linux
                     if platform.system() == "Windows":
                         command = f"format {card} /FS:exFAT /Q /Y"
@@ -193,4 +200,5 @@ def import_cards(config,card_path:Path,copy,move,find,file_extension,dry_run: bo
                     if not dry_run:
                         process = subprocess.Popen(shlex.split(command))
                         process.wait()
+                make_yml(Path(card) / "import.yml", importdetails['card_number'], overwrite=True)
 
