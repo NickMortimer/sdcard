@@ -227,7 +227,7 @@ def probe(config_path: str = typer.Option(None, help="Root path to MarImBA colle
         config_icon = "❌" if not has_import_yml else ""
         dual_slot_icon = "👥" if is_dual_slot else ""
         
-        print(f"{icon} {tb_icon} {speed_limited_icon} {config_icon} {dual_slot_icon} {card['mountpoint']} ({card['size']}) #{card['card_number']:03d}")
+        print(f"{icon} {tb_icon} {speed_limited_icon} {config_icon} {dual_slot_icon} {card['mountpoint']} ({card['size']}) #{card['card_number']}")
         
         if not has_import_yml:
             print(f"    ❌ WARNING: Missing import.yml configuration file!")

@@ -31,7 +31,7 @@ def get_card_number_from_import_yml(file_path: Path):
         try:
             with open(file_path, 'r') as stream:
                 data = yaml.safe_load(stream)
-                return int(data.get('card_number', 0))
+                return data.get('card_number', 0)
         except yaml.YAMLError as exc:
             logging.error(f"Error reading {file_path}: {exc}")
             return 0

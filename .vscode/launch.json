@@ -88,7 +88,8 @@
             "type": "python",
             "request": "launch",
             "program": "/home/mor582/code/sdcard/sdcard/bruv/main.py",
-            "cwd": "/mnt/datasets/fielddata0/fielddata0/LI2024-01",
+            //"cwd": "/mnt/datasets/fielddata0/fielddata0/LI2024-01",
+            "cwd": "/media/mor582/EX_082025/DropCamera",
             "console": "integratedTerminal",
             "justMyCode": true,
 

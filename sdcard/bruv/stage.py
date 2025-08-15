@@ -20,6 +20,7 @@ from sdcard.config import Config
 import shutil
 
 
+
 cfg = None
 CATALOG_DIR = None
 DOIT_CONFIG = {'check_file_uptodate': 'timestamp',"continue": True}
@@ -61,45 +62,89 @@ def task_extract_telemetry():
             
             print(f"📊 Processing telemetry from {video_path.name}")
             from telemetry_parser import Parser as TelemetryParser
+            
             # Extract telemetry data directly from MP4
             extractor = TelemetryParser(str(video_path))
             
-            # Get the normalized IMU data
+            # Get the normalized IMU data (returns accelerometer and gyroscope data)
             imu_data = extractor.normalized_imu()
+            
+            if not imu_data:
+                print(f"⚠️  No telemetry data found in {video_path.name}")
+                return False
+            
+            # Convert to DataFrame - telemetry-parser returns data with timestamp and tuple columns
             data = pd.DataFrame(imu_data)
-
-            # Expand gyro tuple into separate columns
-            if 'gyro' in data.columns:
-                data[['gyro_x', 'gyro_y', 'gyro_z']] = pd.DataFrame(data['gyro'].tolist(), index=data.index)
-                data = data.drop('gyro', axis=1)
+            
+            print(f"📊 Raw telemetry columns: {list(data.columns)}")
+            print(f"📊 First few rows of raw data:")
+            print(data.head())
+            
+            if data.empty:
+                print(f"⚠️  Empty telemetry data for {video_path.name}")
+                return False
+            
+            # The telemetry-parser returns data with columns like:
+            # - timestamp_ms: timestamp in milliseconds  
+            # - accl: tuple/array with (x, y, z) accelerometer readings (m/s²)
+            # - gyro: tuple/array with (x, y, z) gyroscope readings (rad/s)
             
             # Expand accelerometer tuple into separate columns  
             if 'accl' in data.columns:
-                data[['accl_x', 'accl_y', 'accl_z']] = pd.DataFrame(data['accl'].tolist(), index=data.index)
+                # Convert tuple/list to separate x,y,z columns
+                accl_expanded = pd.DataFrame(data['accl'].tolist(), columns=['accl_x', 'accl_y', 'accl_z'])
+                data = pd.concat([data, accl_expanded], axis=1)
                 data = data.drop('accl', axis=1)
+                print("✅ Expanded accelerometer data into accl_x, accl_y, accl_z columns")
             
-            data.to_csv(targets[0], index=False)
+            # Expand gyroscope tuple into separate columns
+            if 'gyro' in data.columns:
+                # Convert tuple/list to separate x,y,z columns
+                gyro_expanded = pd.DataFrame(data['gyro'].tolist(), columns=['gyro_x', 'gyro_y', 'gyro_z'])
+                data = pd.concat([data, gyro_expanded], axis=1)
+                data = data.drop('gyro', axis=1)
+                print("✅ Expanded gyroscope data into gyro_x, gyro_y, gyro_z columns")
+            
+            print(f"📊 Final telemetry columns: {list(data.columns)}")
+            
+            # Ensure we have the expected columns after expansion
+            required_cols = ['timestamp_ms', 'accl_x', 'accl_y', 'accl_z']
+            if not all(col in data.columns for col in required_cols):
+                print(f"⚠️  Missing required telemetry columns in {video_path.name}")
+                print(f"Available columns: {list(data.columns)}")
+                return False
+            
+            # Save to CSV with timestamp as index for easier processing
+            data.to_csv(csv_output, index=False)
+            print(f"✅ Extracted {len(data)} telemetry samples to {csv_output.name}")
             return True
-        except Exception as e:
-            print(f"❌ Error processing {video_path}: {e}")
+            
+        except ImportError:
+            print("❌ telemetry-parser not installed. Run: pip install telemetry-parser")
             return False
-    
+        except Exception as e:
+            print(f"❌ Error extracting telemetry from {video_path.name}: {e}")
+            return False
 
+    config = Config(get_var('config', None))
     
-    config = Config(get_var('config',None))
+    # Process all MP4 files in the card store
     for path in config.get_path('card_store').rglob('100GOPRO'):
-        file_dep = list(path.glob("*.MP4"))
-        for video_path in file_dep:
-            json_output = video_path.with_name(f"{video_path.stem}_telemetry.csv")
+        mp4_files = list(path.glob("*.MP4"))
+        
+        for mp4_file in mp4_files:
+            # Create telemetry CSV filename based on MP4 filename
+            csv_output = mp4_file.with_name(f"{mp4_file.stem}_telemetry.csv")
+            
             yield {
-                'name': json_output,
-                'file_dep': [video_path],
+                'name': f"telemetry_{mp4_file.name}",
+                'file_dep': [mp4_file],
                 'actions': [process_telemetry],
-                'targets': [json_output],
+                'targets': [csv_output],
                 'uptodate': [True],
                 'clean': True,
-            }                     
-                     
+            }
+
                     
 @create_after(executed='create_json', target_regex='.*\.json') 
 def task_make_yml():
@@ -329,7 +374,10 @@ def task_stage_data():
 def task_create_ass():
     def process_srt(dependencies, targets):
         stage = pd.read_csv(config.get_path('deployments'))
-        details =stage.loc[stage.NewFileName==Path(dependencies[0]).name].iloc[0]
+        hits = Path(list(filter(lambda x:  Path(x).name.endswith('.csv'), dependencies))[0])
+        video = Path(list(filter(lambda x:  not Path(x).name.endswith('.csv'), dependencies))[0])
+        hit_data = pd.read_csv(hits)
+        details =stage.loc[stage.NewFileName==video.name].iloc[0]
         def maketag(time):
             total = time.total_seconds()
             m, s = divmod(total, 60)
@@ -357,10 +405,11 @@ def task_create_ass():
             if len(row.NewFileName) == 0:
                 continue
             source = Path(row.destination_directory) / row.NewFileName
+            hit = source.with_name(f"{source.stem}_hitpics.csv")
             target =source.with_suffix('.srt')
             yield { 
                 'name':source.name,
-                'file_dep':[source],
+                'file_dep':[source, hit],
                 'targets': [target],
                 'actions':[process_srt],
                 'uptodate':[True]
@@ -614,6 +663,266 @@ def task_sync_analysis():
                     'uptodate': [True],
                     'clean': True,
                 }
+
+@create_after(executed='stage_data', target_regex='.*\.csv')
+def task_extract_hits():
+    """Analyze time synchronization between paired cameras"""
+    
+    def extract_hits(dependencies, targets):
+        """Analyze sync between accelerometer files from same GroupId"""
+        # Interpolate both signals onto common time grid
+        import pandas as pd
+        import matplotlib.pyplot as plt
+        from sdcard.bruv.impact_detector import ActionCameraImpactDetector
+        import cv2
+        telemetry_file = list(filter(lambda x:  Path(x).name.endswith('.csv'), dependencies))[0]
+        video_file = Path(list(filter(lambda x: Path(x).name.endswith('.MP4'), dependencies))[0])
+        # use openCV to extract hits from video
+        #open the video file
+        cap = cv2.VideoCapture(str(video_file))
+        if not cap.isOpened():
+            print(f"❌ Could not open video file: {video_file}")
+            return False
+        # Read telemetry data
+        try:
+            telemetry_data = pd.read_csv(telemetry_file, index_col='timestamp_ms')
+            if telemetry_data.empty:
+                print(f"❌ Telemetry file is empty: {telemetry_file}")
+                return False
+            print(f"📊 Processing telemetry data from {telemetry_file}")
+            
+            # Calculate actual sampling rate from telemetry timestamps
+            time_diffs = np.diff(telemetry_data.index)  # milliseconds
+            median_interval_ms = np.median(time_diffs)
+            actual_sample_rate = 1000.0 / median_interval_ms if median_interval_ms > 0 else 200
+            print(f"📊 Estimated sampling rate: {actual_sample_rate:.1f} Hz (median interval: {median_interval_ms:.1f}ms)")
+            
+            # Create the impact detector optimized for seafloor impact detection
+            # You can adjust these parameters to control event detection and merging:
+            # - sampling_rate: Match your telemetry data rate
+            # - Sensitivity in detect_action_camera_impacts: 'low', 'medium', 'high'
+            # - include_light_impacts: Include gentle contacts with seafloor
+            detector = ActionCameraImpactDetector(sampling_rate=int(actual_sample_rate))
+            
+            # Calculate magnitude from 3-axis data for impact detection
+            accel_magnitude = np.sqrt(
+                telemetry_data['accl_x']**2 + 
+                telemetry_data['accl_y']**2 + 
+                telemetry_data['accl_z']**2
+            )
+            
+            gyro_magnitude = np.sqrt(
+                telemetry_data['gyro_x']**2 + 
+                telemetry_data['gyro_y']**2 + 
+                telemetry_data['gyro_z']**2
+            )
+            
+            print(f"📊 Telemetry data: {len(accel_magnitude)} samples")
+            print(f"📊 Accel range: {accel_magnitude.min():.2f} to {accel_magnitude.max():.2f} m/s²")
+            print(f"📊 Gyro range: {gyro_magnitude.min():.2f} to {gyro_magnitude.max():.2f} rad/s")
+            
+            # Try different sensitivity levels if high doesn't work
+            for sens in ["medium", "high"]:  # Try medium first, then high
+                print(f"🔍 Trying sensitivity: {sens}")
+                impacts, events, detection_data = detector.detect_action_camera_impacts(
+                    accel_magnitude.values,  # Convert to numpy array
+                    gyro_magnitude.values,   # Convert to numpy array
+                    sensitivity=sens,
+                    include_light_impacts=True  # Include settling/bouncing on seafloor
+                )
+                
+                if len(events) > 0:
+                    print(f"✅ Found {len(events)} events with {sens} sensitivity")
+                    break
+                else:
+                    print(f"❌ No events found with {sens} sensitivity")
+            
+            print(f"📊 Detection thresholds: accel={detection_data['accel_threshold']:.2f}, gyro={detection_data['gyro_threshold']:.2f}")
+            print(f"📊 Data statistics: accel_std={np.std(accel_magnitude):.2f}, gyro_std={np.std(gyro_magnitude):.2f}")
+            
+            # Merge nearby events based on time threshold (e.g., within 2 seconds)
+            def merge_nearby_events(events, time_threshold_seconds=2.0):
+                """Merge events that occur within time_threshold_seconds of each other"""
+                if not events:
+                    return events
+                
+                merged_events = []
+                current_group = [events[0]]
+                
+                for event in events[1:]:
+                    # Check if this event is within the time threshold of the current group
+                    time_diff = event.timestamp - current_group[-1].timestamp
+                    
+                    if time_diff <= time_threshold_seconds:
+                        # Add to current group
+                        current_group.append(event)
+                    else:
+                        # Process current group and start new one
+                        merged_event = merge_event_group(current_group)
+                        merged_events.append(merged_event)
+                        current_group = [event]
+                
+                # Process the last group
+                if current_group:
+                    merged_event = merge_event_group(current_group)
+                    merged_events.append(merged_event)
+                
+                return merged_events
+            
+            def merge_event_group(event_group):
+                """Merge a group of nearby events into a single representative event"""
+                if len(event_group) == 1:
+                    return event_group[0]
+                
+                # Use the event with highest magnitude as the primary event
+                primary_event = max(event_group, key=lambda e: e.accel_magnitude)
+                
+                # Calculate merged properties
+                merged_timestamp = min(e.timestamp for e in event_group)  # Use earliest timestamp
+                merged_time_index = min(e.time_index for e in event_group)
+                merged_accel_mag = max(e.accel_magnitude for e in event_group)  # Peak magnitude
+                merged_gyro_mag = max(e.gyro_magnitude for e in event_group)
+                
+                # Determine severity based on peak values
+                if merged_accel_mag >= detector.impact_thresholds['heavy']:
+                    merged_severity = 'heavy'
+                elif merged_accel_mag >= detector.impact_thresholds['medium']:
+                    merged_severity = 'medium'
+                else:
+                    merged_severity = 'light'
+                
+                # Use the most severe impact type
+                impact_type_priority = {'bounce': 1, 'hit': 2, 'drop': 3, 'crash': 4}
+                merged_impact_type = max(event_group, 
+                                       key=lambda e: impact_type_priority.get(e.impact_type, 0)).impact_type
+                
+                # Average confidence
+                merged_confidence = np.mean([e.confidence for e in event_group])
+                
+                # Create merged event
+                from sdcard.bruv.impact_detector import ActionCameraImpact
+                merged_event = ActionCameraImpact(
+                    time_index=merged_time_index,
+                    timestamp=merged_timestamp,
+                    accel_magnitude=merged_accel_mag,
+                    gyro_magnitude=merged_gyro_mag,
+                    impact_severity=merged_severity,
+                    impact_type=merged_impact_type,
+                    confidence=merged_confidence,
+                    camera_motion=primary_event.camera_motion
+                )
+                
+                return merged_event
+            
+            # Apply event merging
+            print(f"📊 Before merging: {len(events)} events detected")
+            # You can adjust this time threshold to control how close events need to be to get merged:
+            # - 1.0 seconds: Very tight merging, only immediate bounces/settling
+            # - 2.0 seconds: Default, merges most related impacts 
+            # - 5.0 seconds: Loose merging, groups impacts from same general incident
+            merge_time_threshold = 2.0  # seconds
+            events = merge_nearby_events(events, time_threshold_seconds=merge_time_threshold)
+            print(f"📊 After merging (threshold={merge_time_threshold}s): {len(events)} events remaining")
+            
+            if len(events) == 0:
+                print(f"❌ No seafloor impacts detected in {video_file}")
+                return False
+            
+            print(f"✅ Detected {len(events)} potential seafloor impacts in {Path(video_file).name}")
+            
+            # Convert events to DataFrame for saving
+            impact_results = []
+            seafloor_impact_candidates = []
+            
+            for i, event in enumerate(events):
+                # Calculate timestamp in original telemetry data
+                original_timestamp = telemetry_data.index[event.time_index] if event.time_index < len(telemetry_data) else 0
+                
+                impact_data = {
+                    'impact_id': i + 1,
+                    'timestamp_ms': original_timestamp,
+                    'timestamp_seconds': event.timestamp,
+                    'accel_magnitude': event.accel_magnitude,
+                    'gyro_magnitude': event.gyro_magnitude,
+                    'impact_severity': event.impact_severity,
+                    'impact_type': event.impact_type,
+                    'confidence': event.confidence,
+                    'camera_motion': event.camera_motion
+                }
+                
+                # Identify potential seafloor impact (usually early in deployment, significant impact)
+                is_seafloor_candidate = (
+                    event.timestamp < 300 and  # Within first 5 minutes of deployment
+                    event.impact_severity in ['medium', 'heavy'] and
+                    event.confidence > 0.5
+                )
+                
+                impact_data['seafloor_impact_candidate'] = is_seafloor_candidate
+                
+                if is_seafloor_candidate:
+                    seafloor_impact_candidates.append(impact_data)
+                    print(f"🎯 Potential seafloor impact at {event.timestamp:.1f}s: "
+                          f"{event.impact_severity} {event.impact_type} "
+                          f"(confidence: {event.confidence:.2f})")
+                
+                impact_results.append(impact_data)
+            
+            impact_df = pd.DataFrame(impact_results)
+            
+            # Add summary statistics
+            if seafloor_impact_candidates:
+                print(f"🌊 Found {len(seafloor_impact_candidates)} seafloor impact candidates")
+                # The earliest significant impact is likely the seafloor contact
+                earliest_impact = min(seafloor_impact_candidates, key=lambda x: x['timestamp_seconds'])
+                print(f"📍 Most likely seafloor contact: {earliest_impact['timestamp_seconds']:.1f}s "
+                      f"({earliest_impact['impact_severity']} impact)")
+            
+            # Save the impacts to CSV
+            impact_df.to_csv(targets[0], index=False)
+            # get the video frame rate
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            # ok now take frames out of the video corresponding to the impact times
+            hit_frames = []
+            for id, event in enumerate(events):
+                # Calculate frame number based on timestamp
+                frame_number = int(event.timestamp * fps)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_number)
+                ret, frame = cap.read()
+                if ret:
+                    # save frame as image
+                    frame_filename = f"{video_file.stem}_impact_{id:03d}.jpg"
+                    frame_path = Path(targets[0]).parent / frame_filename
+                    cv2.imwrite(str(frame_path), frame)
+   
+            print(f"✅ Saved seafloor impact analysis to {Path(targets[0]).name}")
+            
+            return True
+
+        except Exception as e:
+            print(f"❌ Could not process impact detection for {telemetry_file}")
+            print(f"Error: {e}")
+            return False
+
+    config = Config(get_var('config', None))
+    
+    # Check if deployments file exists
+    deployments_path = config.get_path('deployment_path') 
+    if not deployments_path.exists():
+        print(f"Deployments file not found: {deployments_path}")
+        return
+
+    videos = deployments_path.rglob('*.MP4')
+    for video in videos:
+        file_deps = [video.with_name(f"{video.stem}_telemetry.csv"), video]
+        target = video.with_name(f"{video.stem}_hitpics.csv")
+        yield {
+            'name': f"extract {video.stem}",
+            'file_dep': file_deps,
+            'actions': [extract_hits],
+            'targets': [target],
+            'uptodate': [True],
+            'clean': True,
+        }                
 
 # @create_after(executed='concat_json', target_regex='.*\.json') 
 # def task_report_json():
