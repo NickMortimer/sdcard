@@ -91,6 +91,7 @@ sdcard import /path/to/sd/card /path/to/destination
 ```
 
 ### BRUV Analysis
+Note: Videos need to be in a subdirectory called 100GOPRO or 100MEDIA
 ```bash
 # Process BRUV deployment data (run from field trip directory)
 bruv extract-hits /path/to/video/files

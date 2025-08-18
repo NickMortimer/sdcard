@@ -137,7 +137,7 @@ def task_extract_telemetry():
             csv_output = mp4_file.with_name(f"{mp4_file.stem}_telemetry.csv")
             
             yield {
-                'name': f"telemetry_{mp4_file.name}",
+                'name': f"telemetry_{mp4_file}",
                 'file_dep': [mp4_file],
                 'actions': [process_telemetry],
                 'targets': [csv_output],
@@ -145,6 +145,22 @@ def task_extract_telemetry():
                 'clean': True,
             }
 
+    #DJI compatibility
+    for path in config.get_path('card_store').rglob('100MEDIA'):
+        mp4_files = list(path.glob("*.MP4"))
+        
+        for mp4_file in mp4_files:
+            # Create telemetry CSV filename based on MP4 filename
+            csv_output = mp4_file.with_name(f"{mp4_file.stem}_telemetry.csv")
+            
+            yield {
+                'name': f"telemetry_{mp4_file.name}",
+                'file_dep': [mp4_file],
+                'actions': [process_telemetry],
+                'targets': [csv_output],
+                'uptodate': [True],
+                'clean': True,
+            }
                     
 @create_after(executed='create_json', target_regex='.*\.json') 
 def task_make_yml():
