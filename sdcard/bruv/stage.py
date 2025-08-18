@@ -386,7 +386,7 @@ def task_stage_data():
 
 
 
-@create_after(executed='stage_data', target_regex='.*\.json') 
+@create_after(executed='extract_hits', target_regex='.*\.json') 
 def task_create_ass():
     def process_srt(dependencies, targets):
         stage = pd.read_csv(config.get_path('deployments'))
