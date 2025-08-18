@@ -1,29 +1,140 @@
-# Python Package Template
+# SD Card Management Tool
 
-This sample repo contains the recommended structure for a Python package.
+A Python package for managing SD cards from action cameras, with specialized tools for BRUV (Baited Remote Underwater Video) deployments and telemetry analysis.
 
-## Setup Instructions 
+## Features
 
-This sample makes use of Dev Containers, in order to leverage this setup, make sure you have [Docker installed](https://www.docker.com/products/docker-desktop).
+- **SD Card Management**: Import and organize video files from action cameras
+- **BRUV Analysis**: Specialized tools for underwater camera deployments
+- **Telemetry Processing**: Extract and analyze accelerometer/gyroscope data from GoPro videos
+- **Impact Detection**: Detect seafloor impacts and camera events using machine learning
+- **Video Synchronization**: Analyze time synchronization between paired cameras
+- **Field Trip Integration**: Works with the [field_trip_bruv](https://github.com/NickMortimer/field_trip_bruv) template for organized project structure
 
-The code in this repo aims to follow Python style guidelines as outlined in [PEP 8](https://peps.python.org/pep-0008/).
+## Installation
 
-To successfully run this example, we recommend the following VS Code extensions:
+### Prerequisites
 
-- [Dev Containers](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers)
-- [Python](https://marketplace.visualstudio.com/items?itemName=ms-python.python)
-- [Python Debugger](https://marketplace.visualstudio.com/items?itemName=ms-python.debugpy)
-- [Pylance](https://marketplace.visualstudio.com/items?itemName=ms-python.vscode-pylance) 
+1. **Install Miniconda** (recommended over Anaconda for smaller footprint):
+   - Download from: https://docs.conda.io/en/latest/miniconda.html
+   - Follow the installation instructions for your operating system
 
-In addition to these extension there a few settings that are also useful to enable. You can enable to following settings by opening the Settings editor (`Ctrl+,`) and searching for the following settings:
+### Setup Environment
 
-- Python > Analysis > **Type Checking Mode** : `basic`
-- Python > Analysis > Inlay Hints: **Function Return Types** : `enable`
-- Python > Analysis > Inlay Hints: **Variable Types** : `enable`
+1. **Create a new conda environment** called `cardmanager`:
+   ```bash
+   conda create -n cardmanager python=3.11
+   ```
 
-## Running the Sample
-- Open the template folder in VS Code (**File** > **Open Folder...**)
-- Open the Command Palette in VS Code (**View > Command Palette...**) and run the **Dev Container: Reopen in Container** command
-- Run the app using the Run and Debug view
-- To test, navigate to the Test Panel to configure your Python test or by triggering the **Python: Configure Tests** command from the Command Palette
-- Run tests in the Test Panel or by clicking the Play Button next to the individual tests in the `test_date_time.py` and `test_developer.py` file
+2. **Activate the environment**:
+   ```bash
+   conda activate cardmanager
+   ```
+
+3. **Install the package from repository**:
+   ```bash
+   pip install git+https://github.com/NickMortimer/sdcard.git
+   ```
+
+   Or if you have cloned the repository locally:
+   ```bash
+   cd /path/to/sdcard
+   pip install .
+   ```
+
+### Optional: Install Telemetry Support
+
+For telemetry processing features, install the optional telemetry dependencies:
+
+```bash
+pip install telemetry-parser
+```
+
+### Create Field Trip Project
+
+This tool is designed to work with the BRUV field trip template. After installing the package, create a new field trip project:
+
+1. **Use cookiecutter to create a field trip project**:
+   ```bash
+   cookiecutter https://github.com/NickMortimer/field_trip_bruv
+   ```
+
+2. **Follow the prompts** to configure your field trip (trip name, dates, etc.)
+
+3. **Move to your field trip directory**:
+   ```bash
+   cd your-field-trip-name
+   ```
+
+4. **All sdcard and bruv commands should be run from within this field trip directory**
+
+### Verify Installation
+
+Test that the tools are working from within your field trip directory:
+
+```bash
+# Test the main SD card tool
+sdcard --help
+
+# Test the BRUV analysis tool  
+bruv --help
+```
+
+## Quick Start
+
+**Important:** All commands below should be run from within your field trip directory created with the cookiecutter template.
+
+### Basic SD Card Import
+```bash
+# Import videos from SD card (run from field trip directory)
+sdcard import /path/to/sd/card /path/to/destination
+```
+
+### BRUV Analysis
+```bash
+# Process BRUV deployment data (run from field trip directory)
+bruv extract-hits /path/to/video/files
+```
+
+### Extract Telemetry
+```bash
+# Extract telemetry from GoPro videos (run from field trip directory)
+bruv extract-telemetry /path/to/videos
+```
+
+## Workflow Overview
+
+1. **Install sdcard package** (one time setup)
+2. **Create field trip project** using cookiecutter template
+3. **Navigate to field trip directory**
+4. **Configure field trip settings** in the generated config files
+5. **Run sdcard/bruv commands** from within the field trip directory
+6. **Outputs and data** will be organized according to the field trip structure
+
+## Development Setup
+
+For development, clone the repository and install in editable mode:
+
+```bash
+git clone https://github.com/NickMortimer/sdcard.git
+cd sdcard
+conda create -n cardmanager-dev python=3.11
+conda activate cardmanager-dev
+pip install -e .
+```
+
+## Requirements
+
+- Python 3.11+
+- Typer 0.14.0+ (latest CLI framework with enhanced features)
+- NumPy 2.0+
+- Pandas 2.2+
+- SciPy 1.13+
+- OpenCV 4.10+
+- Rich 13.7+ (enhanced terminal output, included with Typer[all])
+- Click 8.1+ (CLI foundation, dependency of Typer)
+- Cookiecutter 2.5+ (for field trip project templates)
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
