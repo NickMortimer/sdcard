@@ -273,7 +273,7 @@ def probe(config_path: str = typer.Option(None, help="Root path to MarImBA colle
 @sdcard.command('register')
 def register_command(
         card_path: list[str] = typer.Argument(None, help="MarImBA instrument ID.",),
-        card_number: list[int] = typer.Option(None, help="set card number metadata on the card"),
+        card_number: list[str] = typer.Option(None, help="set card number metadata on the card"),
         config_path: str = typer.Option(None, help="Root path to MarImBA collection."),
         all: bool = typer.Option(False, help="Execute the command and print logging to the terminal, but do not change any files."),
         dry_run: bool = typer.Option(False, help="Execute the command and print logging to the terminal, but do not change any files."),
@@ -288,7 +288,7 @@ def register_command(
     config = Config(config_path)
     if all and (not card_path ):
         card_path = list_sdcards(format_type,cardsize)
-        if len(card_number) == 0:
+        if card_number is None:
             card_number = [0] * len(card_path)
     else:
         card_path = [Path(path) for path in card_path]
