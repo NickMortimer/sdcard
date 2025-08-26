@@ -39,7 +39,11 @@ def task_create_json():
             file_dep = list(path.glob("*.MP4"))
             if len(file_dep)>0:
                 target  = path / config.data['exifname']
+                #old 
                 command = f'{exiftool_path} -api largefilesupport=1 -m -u -q -q -n -CameraSerialNumber -CreateDate -TrackCreateDate -OffsetTimeOriginal -SourceFile -Duration -Rate -VideoFrameRate -Model -FileSize -FieldOfView -json -ext MP4 {path} > {target} || :'
+                
+                #
+                #exiftool -api largefilesupport=1 -m -u -q -q -n -json -ext MP4 -ext mp4 -ext JPG -ext jpg
                 if file_dep:
                      yield {  
                         'name':path,
@@ -168,7 +172,8 @@ def task_make_yml():
         def concat(dependencies, targets,config):
             data = pd.read_json(dependencies[0])
             data['CreateDate'] = pd.to_datetime(data.CreateDate, format='%Y:%m:%d  %H:%M:%S')
-            data['CreateDate'] = data['CreateDate'].dt.tz_localize('UTC')
+            #this needs better code
+            data['CreateDate'] = data['CreateDate'].dt.tz_localize(config.data['time_zone'])
             data['TrackCreateDate'] = pd.to_datetime(data.CreateDate, format='%Y:%m:%d  %H:%M:%S')
             data['TrackCreateDate'] = data['TrackCreateDate'].apply(lambda x:x.strftime('%Y%m%dT%H%M%S%z'))
             data['StartTimeLocal'] = data['CreateDate'].dt.tz_convert(config.data['time_zone'])
