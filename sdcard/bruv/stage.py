@@ -28,7 +28,39 @@ format_type = 'exfat'
 
 
 
+def task_hardlink_rawdata():
+    """Hardlink raw data from card_store to raw_data folder"""
+    def hardlink(dependencies, targets):
+         
+        field_path = config.get_path('field_path')
+        stage_path = config.get_path('stage_path')
+        for file in dependencies:
+            file = Path(file)
+            stem =file.relative_to(field_path)
+            target = stage_path / stem
+            if not target.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+                os.link(file, target)
 
+    config = Config(get_var('config',None))      
+    if config.get_path('card_store').exists():
+        videos = list(config.get_path('card_store').rglob("*.MP4"))
+        # replace config.get_path('field_path') with config.get_path('stage_path')
+        if len(videos)==0:
+            return
+        field_path = config.get_path('field_path')
+        stage_path = config.get_path('stage_path')
+        #replace part of the path in each video to point to stage_path
+        relative_part = [video.relative_to(field_path) for video in videos]   # everything after field_path
+        targets = [ stage_path / rel_path for rel_path in relative_part] 
+        return { 
+            'file_dep':videos,
+            'targets':targets,
+            'actions':[hardlink],
+            'uptodate':[True]
+        }
+
+@create_after(executed='hardlink_rawdata', target_regex='.*\.json') 
 def task_create_json():
         config = Config(get_var('config',None))
         if platform.system() == 'Windows':
@@ -139,7 +171,8 @@ def task_extract_telemetry():
         for mp4_file in mp4_files:
             # Create telemetry CSV filename based on MP4 filename
             csv_output = mp4_file.with_name(f"{mp4_file.stem}_telemetry.csv")
-            
+            if csv_output.exists():
+                continue
             yield {
                 'name': f"telemetry_{mp4_file}",
                 'file_dep': [mp4_file],
@@ -245,6 +278,9 @@ def task_concat_yml():
         'uptodate':[True],
         'clean':True,
     } 
+
+
+
 
 
 @create_after(executed='concat_yml', target_regex='.*\.json') 
