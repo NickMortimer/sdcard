@@ -23,6 +23,8 @@ winshell = {version = "^0.6", markers = "sys_platform == 'win32'"}
 cookiecutter = "^2.5.0"
 doit = "^0.36.0"
 scipy = "^1.13.0"
+gpxpy = "^1.6.2"
+
 numpy = "^2.0.0"
 opencv-python = "^4.10.0"
 rich = "^13.7.0"

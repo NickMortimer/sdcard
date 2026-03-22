@@ -107,18 +107,12 @@ def task_extract_telemetry():
             
             if not imu_data:
                 print(f"⚠️  No telemetry data found in {video_path.name}")
-                return False
+                # Create an empty CSV with headers if no data
+                pd.DataFrame(columns=['timestamp_ms', 'accl_x', 'accl_y', 'accl_z', 'gyro_x', 'gyro_y', 'gyro_z']).to_csv(csv_output, index=False)
+                return 
             
             # Convert to DataFrame - telemetry-parser returns data with timestamp and tuple columns
             data = pd.DataFrame(imu_data)
-            
-            print(f"📊 Raw telemetry columns: {list(data.columns)}")
-            print(f"📊 First few rows of raw data:")
-            print(data.head())
-            
-            if data.empty:
-                print(f"⚠️  Empty telemetry data for {video_path.name}")
-                return False
             
             # The telemetry-parser returns data with columns like:
             # - timestamp_ms: timestamp in milliseconds  
@@ -160,7 +154,8 @@ def task_extract_telemetry():
             return False
         except Exception as e:
             print(f"❌ Error extracting telemetry from {video_path.name}: {e}")
-            return False
+            pd.DataFrame(columns=['timestamp_ms', 'accl_x', 'accl_y', 'accl_z', 'gyro_x', 'gyro_y', 'gyro_z']).to_csv(csv_output, index=False)
+            return 
 
     config = Config(get_var('config', None))
     
@@ -203,31 +198,39 @@ def task_extract_telemetry():
 def task_make_yml():
 
         def concat(dependencies, targets,config):
-            data = pd.read_json(dependencies[0])
-            data['CreateDate'] = pd.to_datetime(data.CreateDate, format='%Y:%m:%d  %H:%M:%S')
-            #this needs better code
-            data['CreateDate'] = data['CreateDate'].dt.tz_localize(config.data['time_zone'])
-            data['TrackCreateDate'] = pd.to_datetime(data.CreateDate, format='%Y:%m:%d  %H:%M:%S')
-            data['TrackCreateDate'] = data['TrackCreateDate'].apply(lambda x:x.strftime('%Y%m%dT%H%M%S%z'))
-            data['StartTimeLocal'] = data['CreateDate'].dt.tz_convert(config.data['time_zone'])
-            data['CreateDate'] = data['CreateDate'].apply(lambda x:x.strftime('%Y%m%dT%H%M%S%z'))
-            data['Duration'] = pd.to_timedelta(data['Duration'], unit='s')
-            data['EndTimeLocal'] = data['StartTimeLocal'] + data['Duration']
-            data['StartTimeLocal'] = data['StartTimeLocal'].apply(lambda x:x.strftime('%Y%m%dT%H%M%S%z'))
-            data['EndTimeLocal'] = data['EndTimeLocal'].apply(lambda x:x.strftime('%Y%m%dT%H%M%S%z'))
-            data['Duration'] = data['Duration'].astype(str)
-            for index, row in data.iterrows():
-                target = Path(row['SourceFile']).with_suffix('.yml')
-                if target.exists():
-                    video_data = yaml.safe_load(target.read_text(encoding='utf-8'))
-                    update = row.to_dict()
-                    for key in update.keys():
-                        if key in video_data:
-                            video_data[key] = update[key]
-                else:
-                    video_data = row.to_dict()
-                with open(target, 'w') as f:
-                    yaml.dump(video_data, f, default_flow_style=False)
+            try:
+                data = pd.read_json(dependencies[0])
+                # rows with no time then put 1999-01-01 instead
+                data['CreateDate'] = data['CreateDate'].fillna('1999:01:01 00:00:00')
+                data['TrackCreateDate'] = data['TrackCreateDate'].fillna('1999:01:01 00:00:00')
+                data['Duration'] = data['Duration'].fillna(1)
+                data['CreateDate'] = pd.to_datetime(data.CreateDate, format='%Y:%m:%d  %H:%M:%S')
+                #this needs better code
+                data['CreateDate'] = data['CreateDate'].dt.tz_localize(config.data['time_zone'])
+                data['TrackCreateDate'] = pd.to_datetime(data.CreateDate, format='%Y:%m:%d  %H:%M:%S')
+                data['TrackCreateDate'] = data['TrackCreateDate'].apply(lambda x:x.strftime('%Y%m%dT%H%M%S%z'))
+                data['StartTimeLocal'] = data['CreateDate'].dt.tz_convert(config.data['time_zone'])
+                data['CreateDate'] = data['CreateDate'].apply(lambda x:x.strftime('%Y%m%dT%H%M%S%z'))
+                data['Duration'] = pd.to_timedelta(data['Duration'], unit='s')
+                data['EndTimeLocal'] = data['StartTimeLocal'] + data['Duration']
+                data['StartTimeLocal'] = data['StartTimeLocal'].apply(lambda x:x.strftime('%Y%m%dT%H%M%S%z'))
+                data['EndTimeLocal'] = data['EndTimeLocal'].apply(lambda x:x.strftime('%Y%m%dT%H%M%S%z'))
+                data['Duration'] = data['Duration'].astype(str)
+                for index, row in data.iterrows():
+                    target = Path(row['SourceFile']).with_suffix('.yml')
+                    if target.exists():
+                        video_data = yaml.safe_load(target.read_text(encoding='utf-8'))
+                        update = row.to_dict()
+                        for key in update.keys():
+                            if key in video_data:
+                                video_data[key] = update[key]
+                    else:
+                        video_data = row.to_dict()
+                    with open(target, 'w') as f:
+                        yaml.dump(video_data, f, default_flow_style=False)
+            except Exception as e:
+                print(f"Error processing {dependencies[0]}: {e}")
+                return False
                 
                  
         config = Config(get_var('config',None))
@@ -796,7 +799,7 @@ def task_extract_hits():
             
             print(f"📊 Detection thresholds: accel={detection_data['accel_threshold']:.2f}, gyro={detection_data['gyro_threshold']:.2f}")
             print(f"📊 Data statistics: accel_std={np.std(accel_magnitude):.2f}, gyro_std={np.std(gyro_magnitude):.2f}")
-            
+
             # Merge nearby events based on time threshold (e.g., within 2 seconds)
             def merge_nearby_events(events, time_threshold_seconds=2.0):
                 """Merge events that occur within time_threshold_seconds of each other"""
@@ -1378,13 +1381,13 @@ def task_extract_hits():
 #                 else:
 #                     os.rmdir(full_path)
 
-def run():
+def run(args):
     import sys
     from doit.cmd_base import ModuleTaskLoader, get_loader
     from doit.doit_cmd import DoitMain
     DOIT_CONFIG = {'check_file_uptodate': 'timestamp',"continue": True}
     #print(globals())
-    DoitMain(ModuleTaskLoader(globals())).run(sys.argv[1:])
+    DoitMain(ModuleTaskLoader(globals())).run(args)
 
 if __name__ == '__main__':
     import doit

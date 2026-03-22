@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Video & Waypoint Browser</title>
+</head>
+<body>
+<h1>Video & Waypoint Table</h1>
+<table border="1" id="video-table">
+    <thead>
+        <tr>
+            <th>Index</th>
+            <th>Video</th>
+            <th>Waypoint</th>
+            <th>Select</th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for row in deployments %}
+        <tr onclick="selectVideo({{ loop.index0 }}, this.dataset.videoUrl)" data-video-url="{{ url_for('video', filename=row['SourceFile']) }}">
+            <td>{{ loop.index }}</td>
+            <td>{{ row['SourceFile'] }}</td>
+            <td>
+                <form method="post" action="{{ url_for('select') }}" style="margin:0;">
+                    <input type="hidden" name="video_idx" value="{{ loop.index0 }}">
+                    <select name="waypoint">
+                        <option value="">-- Select Waypoint --</option>
+                        {% for wpt in waypoints %}
+                            <option value="{{ wpt['name'] }}">{{ wpt['name'] }}</option>
+                        {% endfor %}
+                    </select>
+            </td>
+            <td>
+                    <button type="submit">Save</button>
+                </form>
+            </td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table>
+<h2>Selected Video</h2>
+<video id="video-player" width="640" controls>
+    <source id="video-source" src="{{ url_for('video', filename=deployments[0]['SourceFile']) if deployments|length > 0 else '' }}" type="video/mp4">
+    Your browser does not support the video tag.
+</video>
+<script>
+function selectVideo(idx, videoUrl) {
+    var player = document.getElementById('video-player');
+    var source = document.getElementById('video-source');
+    if (source.src !== videoUrl) {
+        source.src = videoUrl;
+        player.load();
+    }
+    player.scrollIntoView({behavior: 'smooth'});
+}
+</script>
+</body>
+</html>

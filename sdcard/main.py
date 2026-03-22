@@ -32,15 +32,9 @@ import typer
 import shlex
 
 
-__author__ = "GoPro BRUV Development Team"
-__copyright__ = "Copyright 2023                                                                                                                                                                                                                                                                                                                                                                                                                               , CSIRO"
-__credits__ = [
-    "Nick Mortimer <nick.mortimer@csiro.au>",
-]
+__author__ = "SDCard Maintainers"
 __license__ = "MIT"
 __version__ = "0.2"
-__maintainer__ = "Nick Mortimer"
-__email__ = "nick.mortimer@csiro.au"
 __status__ = "Development"
 
 sdcard = typer.Typer(
@@ -54,7 +48,7 @@ sdcard = typer.Typer(
 
 
 @sdcard.command('probe')
-def probe(config_path: str = typer.Option(None, help="Root path to MarImBA collection."),
+def probe(config_path: str = typer.Option(None, help="Path to config directory."),
          format_type:str = typer.Option('exfat', help="Card format type"),
          card_size:int = typer.Option(512, help="maximum card size"),
          max_sd_speed:float = typer.Option(140.0, help="Maximum realistic SD card read speed in MB/s"),
@@ -272,9 +266,9 @@ def probe(config_path: str = typer.Option(None, help="Root path to MarImBA colle
 
 @sdcard.command('register')
 def register_command(
-        card_path: list[str] = typer.Argument(None, help="MarImBA instrument ID.",),
-        card_number: list[str] = typer.Option(None, help="set card number metadata on the card"),
-        config_path: str = typer.Option(None, help="Root path to MarImBA collection."),
+    card_path: list[str] = typer.Argument(None, help="One or more SD card mount points"),
+    card_number: list[str] = typer.Option(None, help="Set card number metadata on the card"),
+    config_path: str = typer.Option(None, help="Path to config directory."),
         all: bool = typer.Option(False, help="Execute the command and print logging to the terminal, but do not change any files."),
         dry_run: bool = typer.Option(False, help="Execute the command and print logging to the terminal, but do not change any files."),
         overwrite:bool = typer.Option(False, help="Overwrite import.yaml"),
@@ -289,7 +283,7 @@ def register_command(
     if all and (not card_path ):
         card_path = list_sdcards(format_type,cardsize)
         if card_number is None:
-            card_number = [0] * len(card_path)
+            card_number = ['0'] * len(card_path)
     else:
         card_path = [Path(path) for path in card_path]
     register_cards(config,card_number=card_number,card_path=card_path,dry_run=dry_run,overwrite=overwrite)
@@ -305,35 +299,39 @@ def list_cards(format_type: str = "exfat"):
 
 @sdcard.command('import')
 def import_command(
-        card_path: list[str] = typer.Argument(None, help="MarImBA instrument ID."),
-        config_path: Path = typer.Option(None,help="Path to config file"),
-        copy: bool = typer.Option(True, help="Clean source"),
-        move: bool = typer.Option(False, help="move source"),
-        find: bool = typer.Option(True, help="import to the same hash"),
-        card_size:int = typer.Option(512, help="maximum card size"),
-        format_type:str = typer.Option('exfat', help="Card format type"),
-        dry_run: bool = typer.Option(False, help="Execute the command and print logging to the terminal, but do not change any files."),
+        card_path: list[str] = typer.Argument(None, help="One or more SD card mount points"),
+        config_path: Path = typer.Option(None, help="Path to config file"),
+        copy: bool = typer.Option(True, help="Copy source (default)", show_default=True),
+        move: bool = typer.Option(False, help="Move source and delete after copy"),
+        find: bool = typer.Option(True, help="Reuse an existing destination that matches the import token"),
+        card_size: int = typer.Option(512, help="Maximum card size to auto-detect"),
+        format_type: str = typer.Option('exfat', help="Card format type"),
+        dry_run: bool = typer.Option(False, help="Show actions without changing files"),
         file_extension: str = typer.Option("MP4", help="extension to catalog"),
         format_card: bool = typer.Option(False, help="Format drive after import and move")
     ):
-    """
-    Import SD cards to working directory
-    """
+    """Import SD cards to the configured card store."""
     from sdcard.utils.cards import list_sdcards
     from sdcard.utils.cards import import_cards
     config = Config(config_path)
-    if all and (not card_path ):
-        card_path = list_sdcards(format_type,card_size)
-    import_cards(config=config,card_path=card_path,copy=copy,move=move,find=find,dry_run=dry_run,file_extension=file_extension,format_card=format_card)
 
-@sdcard.command('web')
-def web():
-    """Start web interface"""
-    from sdcard.web.app import run_server
-    run_server()
+    # Auto-discover cards if none were provided
+    if not card_path:
+        card_path = list_sdcards(format_type, card_size)
+
+    import_cards(
+        config=config,
+        card_path=card_path,
+        copy=copy,
+        move=move,
+        find=find,
+        dry_run=dry_run,
+        file_extension=file_extension,
+        format_card=format_card,
+    )
 
 @sdcard.command('turbo')
-def import_all(config_path: str = typer.Option(None, help="Root path to MarImBA collection."),
+def import_all(config_path: str = typer.Option(None, help="Path to config directory."),
          max_processes:int = typer.Option(4, help="Number of concurrent transfers"),
          format_type:str = typer.Option('exfat', help="Card format type"),
          card_size:int = typer.Option(512, help="maximum card size"),
@@ -414,7 +412,8 @@ def import_all(config_path: str = typer.Option(None, help="Root path to MarImBA 
             
             hierarchy = get_usb_hierarchy_info(card['name'])
             if (Path(card['mountpoint']) / "import.yml").exists():
-                raw_data = yaml.safe_load(file_path.read_text(encoding='utf-8'))
+                import_yml_path = Path(card['mountpoint']) / "import.yml"
+                raw_data = yaml.safe_load(import_yml_path.read_text(encoding='utf-8'))
                 card['card_number'] = raw_data['card_number'] if 'card_number' in raw_data else 0
                 if 'card_reader' in hierarchy:
                     reader_path = hierarchy['card_reader'].get('usb_path', 'unknown')

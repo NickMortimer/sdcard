@@ -41,3 +41,5 @@ class Config:
     @property
     def settings(self):
         return self.data
+    
+cfg = Config()

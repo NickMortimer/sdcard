@@ -28,8 +28,11 @@ goprobruv = typer.Typer(
 )
 
 
-@goprobruv.command('process')
-def process(config_path : str= typer.Argument(None, help="path to config file")):
+@goprobruv.command('process', context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def process(
+    ctx: typer.Context,
+    config_path : str= typer.Argument(None, help="path to config file")
+):
     """
      process drone data if no path to config file is specified all drones processed in sequence
     """
@@ -37,7 +40,7 @@ def process(config_path : str= typer.Argument(None, help="path to config file"))
     config = Config(config_path)
     sys.argv.append(f'config={config.get_path("CATALOG_DIR") / "config.yml"}')
     import sdcard.bruv.stage as dodo
-    dodo.run()
+    dodo.run(ctx.args)
 
 if __name__ == "__main__":
-    goprobruv()                
+    goprobruv()
