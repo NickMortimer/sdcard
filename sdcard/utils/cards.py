@@ -1,10 +1,10 @@
 
 from pathlib import Path
 from jinja2 import Environment, FileSystemLoader
-from datetime import datetime,  timedelta
+from datetime import datetime, timedelta
 import uuid
 import psutil
-from math import  ceil
+from math import ceil
 import typer
 import yaml
 import glob
@@ -16,6 +16,9 @@ import os
 from io import StringIO
 import platform
 import re
+from sdcard.config import DEFAULT_IMPORT_TEMPLATE
+
+DEFAULT_IMPORT_YML_TEMPLATE = """card_number: {{ card_number }}\nimport_token: {{ import_token }}\nregister_date: {{ register_date }}\nimport_date: {{ import_date }}\ndestination_path: {{ destination_path }}\n"""
 
 def get_card_number_from_import_yml(file_path: Path):
     """
@@ -103,102 +106,170 @@ def list_sdcards(format_type,maxcardsize=512):
                 result.append(i.mountpoint)
     return result
 
+def _render_destination_path(config, import_context: dict) -> str:
+    """Render the destination path using config template and context."""
+    template_string = config.data.get('import_path_template', DEFAULT_IMPORT_TEMPLATE)
+    environment = Environment()
+    template = environment.from_string(template_string)
+    return template.render(**import_context)
+
+
 def make_yml(file_path, config, dry_run, card_number=0, overwrite=False):
+    """Create or refresh an import.yml for a card."""
+    existing = {}
     if file_path.exists():
-        if (overwrite):
-            if card_number==0:
-                raw_data = yaml.safe_load(file_path.read_text(encoding='utf-8'))
-                card_number = raw_data['card_number'] if 'card_number' in raw_data else 0
-        else:
+        if not overwrite:
             typer.echo(f"Error SDCard already initialise {file_path}")
             return
-    if card_number==0:
-        card_number = typer.prompt(f"Card number [{str(file_path)}]", type=str, default='1')    
-    env = Environment(loader = FileSystemLoader(config.get_path('CATALOG_DIR')),   trim_blocks=True, lstrip_blocks=True)
-    template = env.get_template(config.get_path('import_template_path').name)
-    fill = {"instrumentPath" : Path.cwd(), "instrument" : 'gopro_bruv',
-            "import_date" : f"{datetime.now():%Y-%m-%d}",
-            "import_token" : str(uuid.uuid4())[0:8],
-            "card_number" : card_number}
-    #self.logger.info(f'{dry_run_log_string}Making import file "{file_path}"')
+        try:
+            existing = yaml.safe_load(file_path.read_text(encoding='utf-8')) or {}
+        except yaml.YAMLError:
+            existing = {}
+        if card_number == 0:
+            card_number = existing.get('card_number', 0)
+
+    if card_number == 0:
+        card_number = typer.prompt(f"Card number [{str(file_path)}]", type=str, default='1')
+
+    register_date = existing.get("register_date") or f"{datetime.now():%Y-%m-%d}"
+    import_date = existing.get("import_date") or register_date
+    import_token = existing.get("import_token") or str(uuid.uuid4())[0:8]
+    destination_path = existing.get("destination_path")
+
+    import_context = {
+        "import_date": import_date,
+        "import_token": import_token,
+        "card_number": card_number,
+        "card_store": str(config.get_path('card_store')),
+        "CATALOG_DIR": str(config.catalog_dir),
+        "register_date": register_date,
+    }
+    if not destination_path:
+        destination_path = _render_destination_path(config, import_context)
+    import_context["destination_path"] = destination_path
+
+    template_path = config.data.get('import_template_path')
+    if template_path:
+        env = Environment(loader=FileSystemLoader(Path(template_path).parent), trim_blocks=True, lstrip_blocks=True)
+        template = env.get_template(Path(template_path).name)
+        rendered = template.render(import_context)
+    else:
+        env = Environment(trim_blocks=True, lstrip_blocks=True)
+        template = env.from_string(DEFAULT_IMPORT_YML_TEMPLATE)
+        rendered = template.render(import_context)
+
     if not dry_run:
-        with open(file_path, "w") as file:
-            file.write(template.render(fill))
+        with open(file_path, "w", encoding="utf-8") as file:
+            file.write(rendered)
 
 def register_cards(config,card_path,card_number,overwrite,dry_run: bool):
     """
-    Implementation of the MarImBA initialise command for the BRUVS
+    Register SD cards by creating an import.yml on each card
     """
-
-
     # Set dry run log string to prepend to logging
-    dry_run_log_string = "DRY_RUN - " if dry_run else ""    
-    if isinstance(card_path,list):
-        [make_yml(Path(path)/ "import.yml", config, dry_run, cardno, overwrite) for path,cardno in zip(card_path,card_number)]
-    else:
-        make_yml(Path(card_path) /"import.yml", config, dry_run, card_number, overwrite)
+    dry_run_log_string = "DRY_RUN - " if dry_run else ""
 
-def import_cards(config,card_path:Path,copy,move,find,file_extension,dry_run: bool,format_card=False):
-    """
-    Implementation of the MarImBA initalise command for the BRUVS
-    """
+    if card_number is None:
+        card_number = ['0'] * len(card_path) if isinstance(card_path, list) else 0
+
+    if isinstance(card_path, list):
+        for path, cardno in zip(card_path, card_number):
+            make_yml(Path(path) / "import.yml", config, dry_run, cardno, overwrite)
+    else:
+        make_yml(Path(card_path) / "import.yml", config, dry_run, card_number, overwrite)
+
+def import_cards(config, card_path, copy, move, find, file_extension, dry_run: bool, format_card=False):
+    """Copy or move SD card contents to the configured card store."""
     for card in card_path:
         dry_run_log_string = "DRY_RUN - " if dry_run else ""
-        importyml =f"{card}/import.yml"
-        if os.path.exists(importyml):
-            with open(importyml, 'r') as stream:
-                try:
-                    importdetails=yaml.safe_load(stream)
-                except yaml.YAMLError as exc:
-                    raise typer.Abort(f"Error possible corrupt yaml {importyml}")
+        importyml = Path(card) / "import.yml"
+        if importyml.exists():
+            try:
+                importdetails = yaml.safe_load(importyml.read_text(encoding='utf-8'))
+            except yaml.YAMLError as exc:
+                raise typer.Abort(f"Error possible corrupt yaml {importyml}: {exc}")
         else:
             typer.echo(f"Error {importyml} not found")
+            continue
+
         typer.echo(f"💾 Reading {importdetails['import_token']} from {card}")
-        importdetails['card_store'] = config.data['card_store']  
-        importdetails["import_date"] = f"{datetime.now():%Y-%m-%d}"
-        # Find all matching paths
-        matches = list(Path(config.get_path('card_store')).rglob(f"*{importdetails['import_token']}*"))
+        card_store = Path(config.data.get('card_store'))
+        importdetails.setdefault("register_date", f"{datetime.now():%Y-%m-%d}")
+        if not importdetails.get("import_date"):
+            importdetails["import_date"] = f"{datetime.now():%Y-%m-%d}"
+
+        # Resolve destination: prefer explicit destination_path from import.yml, otherwise render from template
+        destination_path = importdetails.get('destination_path')
+        if not destination_path:
+            import_context = {
+                "import_date": importdetails.get("import_date"),
+                "import_token": importdetails.get("import_token"),
+                "card_number": importdetails.get("card_number", 0),
+                "card_store": str(card_store),
+                "CATALOG_DIR": str(config.catalog_dir),
+                "register_date": importdetails.get("register_date"),
+            }
+            destination_path = _render_destination_path(config, import_context)
+
+        destination = Path(destination_path)
+
+        # Allow reuse of an existing destination when find flag is on
+        if find:
+            matches = list(card_store.rglob(f"*{importdetails.get('import_token')}*"))
+            if matches:
+                destination = max(matches)
+
+        # Choose rclone binary per platform
         if platform.system() == "Windows":
             rclone_path = config.catalog_dir / 'bin' / 'rclone.exe'
         else:
             rclone_path = 'rclone'
 
-        # Get destination path - either newest match or create new from template
-        destination = (max(matches) if matches 
-                    else Path(config.data['import_path_template'].format(**importdetails)))
         if copy:
             logging.info(f'{dry_run_log_string}  Copy  {card} --> {destination}')
-            command =f"{rclone_path} copy {Path(card).resolve()} {destination.resolve()} --progress --low-level-retries 1 "
+            command = f"{rclone_path} copy {Path(card).resolve()} {destination.resolve()} --progress --low-level-retries 1 "
             logging.info(f'running {command}')
-            command = command.replace('\\','/')
+            command = command.replace('\\', '/')
             logging.info(f'{dry_run_log_string}  {command}')
             if not dry_run:
-                destination.mkdir(exist_ok=True,parents=True)
+                destination.mkdir(exist_ok=True, parents=True)
                 process = subprocess.Popen(shlex.split(command))
                 process.wait()
-        if move:
-            command =f"{rclone_path} move {card} {destination} --progress --delete-empty-src-dirs"
-            command = command.replace('\\','/')
-            logging.info(f'{dry_run_log_string}  {command}')
-            if not dry_run:
-                destination.mkdir(exist_ok=True,parents=True)
-                process = subprocess.Popen(shlex.split(command))
-                process.wait()
-                ## check if drive is empty less than 1Gb
 
-                if format_card and (psutil.disk_usage(card).used < 1 * 1024**3):  # Less than 1 GB used
-                    #format the drive on windows and linux
+        if move:
+            command = f"{rclone_path} move {card} {destination} --progress --delete-empty-src-dirs"
+            command = command.replace('\\', '/')
+            logging.info(f'{dry_run_log_string}  {command}')
+            if not dry_run:
+                destination.mkdir(exist_ok=True, parents=True)
+                process = subprocess.Popen(shlex.split(command))
+                process.wait()
+
+                if format_card and (psutil.disk_usage(card).used < 1 * 1024**3):
                     if platform.system() == "Windows":
                         command = f"format {card} /FS:exFAT /Q /Y"
                     else:
                         command = f"mkfs.exfat {card}"
-                    command = command.replace('\\','/')
+                    command = command.replace('\\', '/')
                     logging.info(f'{dry_run_log_string}  Deleting empty drive {card}')
                     command = f"rmdir {card}"
-                    command = command.replace('\\','/')
+                    command = command.replace('\\', '/')
                     logging.info(f'{dry_run_log_string}  {command}')
                     if not dry_run:
                         process = subprocess.Popen(shlex.split(command))
                         process.wait()
-                make_yml(Path(card) / "import.yml", config, dry_run, importdetails['card_number'], overwrite=True)
+
+                # Re-create import.yml so the card stays registered
+                make_yml(importyml, config, dry_run, importdetails.get('card_number', 0), overwrite=True)
+
+        # Persist updated import_date/register_date when a transfer actually occurred
+        if not dry_run and (copy or move):
+            persisted = {
+                "card_number": importdetails.get("card_number"),
+                "import_token": importdetails.get("import_token"),
+                "register_date": importdetails.get("register_date"),
+                "import_date": importdetails.get("import_date"),
+                "destination_path": importdetails.get("destination_path", destination_path),
+            }
+            importyml.write_text(yaml.safe_dump(persisted), encoding="utf-8")
 
