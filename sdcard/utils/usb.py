@@ -1,7 +1,6 @@
 import pandas as pd
 import subprocess
 import json
-import numpy as np
 import os
 import shlex
 from pathlib import Path

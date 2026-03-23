@@ -5,6 +5,8 @@
     "version": "0.2.0",
     "configurations": [
 
+
+
         {
             "name": "Python Debugger: Current File",
             "type": "debugpy",
@@ -83,16 +85,6 @@
             "justMyCode": true,
             "args":["turbo"],
 
-        },{
-            "name": "bruv process",
-            "type": "python",
-            "request": "launch",
-            "program": "/home/mor582/code/sdcard/sdcard/bruv/main.py",
-            //"cwd": "/mnt/datasets/fielddata0/fielddata0/LI2024-01",
-            "cwd": "/media/mor582/EX_082025/DropCamera",
-            "console": "integratedTerminal",
-            "justMyCode": true,
-
         },   {
             "name": "windows import_all",
             "type": "python",
@@ -112,6 +104,35 @@
             "args":["probe"],
             "justMyCode": true
         },
+         {
+            "name": "in water",
+            "type": "python",
+            "request": "launch",
+            "program": "/home/mor582/code/sdcard/sdcard/clip/in_water.py",
+            "cwd": "/mnt/md127/fielddata0/DropCamera",
+            //"cwd": "/mnt/datasets/fielddata0/fielddata0/LI2024-01",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args":["-n","5"]
+        },
+                {
+            "name": "sdcard register 2",
+            "type": "python",
+            "request": "launch",
+            "program": "/home/mor582/code/sdcard/sdcard/main.py",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args":["register","--all","--config-path","/home/mor582/raid/IN2026-02/CSIRO/BMR4-80/import.yml","--overwrite","--cardsize","1030"]
+        },
+                {
+            "name": "sdcard import 2",
+            "type": "python",
+            "request": "launch",
+            "program": "/home/mor582/code/sdcard/sdcard/main.py",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args":["import","/media/mor582/PG10300275","--config-path","/home/mor582/raid/IN2026-02/CSIRO/BMR4-80/import.yml"]
+        }
     ]
 }
 

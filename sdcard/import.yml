@@ -1,0 +1,14 @@
+field_trip_id : DR2024-02
+start_date : 2024-05-13
+end_date : 2024-05-25
+custodian : Nick Mortimer
+email : nick.mortimer@csiro.au
+project_name : Ningaloo outlook
+instrument : gopro_bruv
+card_number : 44
+
+import_date : 2024-05-14
+import_token : c45e0702
+import_template : "{instrument_path}/raw/{import_date}/{bruv_frame}_{housing_label}_{camera_serial_number}_{camera_create_date:%Y%m%dT%H%M}_{import_token}"
+
+
