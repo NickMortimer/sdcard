@@ -25,7 +25,7 @@ sdall = typer.Typer(
 )
 
 @sdall.command('probe')
-def probe(config_path: str = typer.Option(None, help="Root path to MarImBA collection."),
+def probe(config_path: str = typer.Option(None, help="Path to config directory."),
          format_type:str = typer.Option('exfat', help="Card format type"),
          card_size:int = typer.Option(512, help="maximum card size"),
          max_sd_speed:float = typer.Option(140.0, help="Maximum realistic SD card read speed in MB/s"),
@@ -286,13 +286,13 @@ def probe(config_path: str = typer.Option(None, help="Root path to MarImBA colle
     print("✅ Probe analysis completed!")
 
 @sdall.command('import_all')
-def import_all(config_path: str = typer.Option(None, help="Root path to MarImBA collection."),
+def import_all(config_path: str = typer.Option(None, help="Path to config directory."),
          max_processes:int = typer.Option(4, help="Number of concurrent transfers"),
          format_type:str = typer.Option('exfat', help="Card format type"),
          card_size:int = typer.Option(512, help="maximum card size"),
          clean:bool = typer.Option(False, help="move all the files to location"),
          debug:bool = typer.Option(False, help="Card format type"),
-         max_sd_speed:float = typer.Option(140.0, help="Maximum realistic SD card read speed in MB/s"),
+        max_sd_speed:float = typer.Option(140.0, help="Maximum realistic SD card read speed in MB/s (auto-detect if not specified)"),
          dest_write_speed:float = typer.Option(None, help="Override destination drive write speed in MB/s (auto-detect if not specified)")):
     
     if platform.system() == "Linux":

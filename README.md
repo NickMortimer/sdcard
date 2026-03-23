@@ -1,141 +1,122 @@
 # SD Card Management Tool
 
-A Python package for managing SD cards from action cameras, with specialized tools for BRUV (Baited Remote Underwater Video) deployments and telemetry analysis.
+Minimal, instrument-agnostic SD card helper for probing, registering, and importing cards to a local store.
 
 ## Features
 
-- **SD Card Management**: Import and organize video files from action cameras
-- **BRUV Analysis**: Specialized tools for underwater camera deployments
-- **Telemetry Processing**: Extract and analyze accelerometer/gyroscope data from GoPro videos
-- **Impact Detection**: Detect seafloor impacts and camera events using machine learning
-- **Video Synchronization**: Analyze time synchronization between paired cameras
-- **Field Trip Integration**: Works with the [field_trip_bruv](https://github.com/NickMortimer/field_trip_bruv) template for organized project structure
+- Probe USB tree and show card/destination throughput estimates
+- Register cards by writing a simple `import.yml`
+- Import (copy/move) cards into a configurable `card_store`
+- Turbo: fan out imports across multiple terminals on Linux
 
 ## Installation
 
-### Prerequisites
-
-1. **Install Miniconda** (recommended over Anaconda for smaller footprint):
-   - Download from: https://docs.conda.io/en/latest/miniconda.html
-   - Follow the installation instructions for your operating system
-
-### Setup Environment
-
-1. **Create a new conda environment** called `cardmanager`:
-   ```bash
-   conda create -n cardmanager python=3.11
-   ```
-
-2. **Activate the environment**:
-   ```bash
-   conda activate cardmanager
-   ```
-
-3. **Install the package from repository**:
-   ```bash
-   pip install git+https://github.com/NickMortimer/sdcard.git
-   ```
-
-   Or if you have cloned the repository locally:
-   ```bash
-   cd /path/to/sdcard
-   pip install .
-   ```
-
-### Optional: Install Telemetry Support
-
-For telemetry processing features, install the optional telemetry dependencies:
-
 ```bash
-pip install telemetry-parser
+pip install git+https://github.com/NickMortimer/sdcard.git
+# or from a local clone
+pip install .
 ```
 
-### Create Field Trip Project
-
-This tool is designed to work with the BRUV field trip template. After installing the package, create a new field trip project:
-
-1. **Use cookiecutter to create a field trip project**:
-   ```bash
-   cookiecutter https://github.com/NickMortimer/field_trip_bruv
-   ```
-
-2. **Follow the prompts** to configure your field trip (trip name, dates, etc.)
-
-3. **Move to your field trip directory**:
-   ```bash
-   cd your-field-trip-name
-   ```
-
-4. **All sdcard and bruv commands should be run from within this field trip directory**
-
-### Verify Installation
-
-Test that the tools are working from within your field trip directory:
+## Usage
 
 ```bash
-# Test the main SD card tool
-sdcard --help
+# List available cards
+sdcard list
 
-# Test the BRUV analysis tool  
-bruv --help
+# List cards with reader manufacturer and speed details
+sdcard list --verbose
+
+# Probe ports, cards, and destination speed
+sdcard probe
+
+# Register cards (creates import.yml on each card)
+sdcard register --all
+
+# Register cards and prompt for optional manufacturer/UHS metadata
+sdcard register --all --card-details
+
+# Import cards (auto-discovers if none specified)
+sdcard import
+
+# Run concurrent imports on Linux
+sdcard turbo
 ```
 
-## Quick Start
+During import, each destination folder also gets a `README.md` summarizing the project and custodian metadata from the card's `import.yml`.
 
-**Important:** All commands below should be run from within your field trip directory created with the cookiecutter template.
+You can customize that README with either of these config keys:
 
-### Basic SD Card Import
-```bash
-# Import videos from SD card (run from field trip directory)
-sdcard import /path/to/sd/card /path/to/destination
+- `destination_readme_template`: inline Jinja template text
+- `destination_readme_template_path`: path to a Jinja template file, relative to the config file directory unless absolute
+
+Example:
+
+```yaml
+destination_readme_template: |
+	# {{ project_name }}
+
+	Custodian: {{ custodian }}
+	{% if email %}Contact: {{ email }}{% endif %}
+	{% if field_trip_id %}Field trip: {{ field_trip_id }}{% endif %}
+	Card: {{ card_number }}
+	Token: {{ import_token }}
 ```
 
-### BRUV Analysis
-Note: Videos need to be in a subdirectory called 100GOPRO or 100MEDIA
-```bash
-# Process BRUV deployment data (run from field trip directory)
-bruv extract-hits /path/to/video/files
+Configuration is read from `config.yml` in the current directory. Defaults:
+
+- `card_store`: `./card_store`
+- `import_path_template`: `{{card_store}}/{import_date}/{import_token}`
+
+When you pass a config file to `sdcard register --config-path ...`, all top-level key/value pairs from that config file are copied into each card's `import.yml` (card-specific fields like `card_number`, `import_token`, `destination_path`, `card_size_gb`, and `card_format` still take precedence).
+
+### Card import.yml (on each card)
+
+Each SD card uses a small `import.yml` to track its ID and destination. The tool writes this file during `sdcard register`, but you can also create it manually:
+
+```yaml
+card_number: 1
+import_token: abcd1234   # generated during registration (unique per registration)
+import_date: 2024-01-31  # optional; set on first write
+destination_path: /data/card_store/2024-01-31/abcd1234  # optional; fallback is the template above
+partition_label: SDXC_128GB
+card_size_gb: 119.24
+card_format: exfat
+card_manufacturer: SanDisk  # optional; prompted with --card-details
+rated_uhs: U3               # optional; prompted with --card-details
+max_read_speed_mb_s: 200.0  # optional; prompted with --card-details
+max_write_speed_mb_s: 90.0  # optional; prompted with --card-details
 ```
 
-### Extract Telemetry
-```bash
-# Extract telemetry from GoPro videos (run from field trip directory)
-bruv extract-telemetry /path/to/videos
+Only `card_number` and a token are required; `destination_path` can be omitted to use the template.
+
+Notes:
+- `register_date` is set when the card is registered.
+- `import_token` is generated at registration and reused on import.
+- `import_date` is set the first time the card is actually copied/moved.
+- The stable `import_token` lets you retry large batch imports (e.g., 30+ cards) without changing destinations if a run fails.
+ 
+a full yaml file allows for useful metadata
+```yaml
+field_trip_id : DR2024-02
+start_date : 2024-05-13
+end_date : 2024-05-25
+custodian : Nikki Minnow
+email : nikki.minnow@....
+project_name : Outlook
+instrument : gopro_bruv
+card_number : 44
+import_date: <- set by  first import
+import_token : <-set by registration
+import_template : "{{card_store}}/{instrument}/{import_date}/{card_number}_{import_token}
 ```
-
-## Workflow Overview
-
-1. **Install sdcard package** (one time setup)
-2. **Create field trip project** using cookiecutter template
-3. **Navigate to field trip directory**
-4. **Configure field trip settings** in the generated config files
-5. **Run sdcard/bruv commands** from within the field trip directory
-6. **Outputs and data** will be organized according to the field trip structure
-
-## Development Setup
-
-For development, clone the repository and install in editable mode:
+## Development
 
 ```bash
 git clone https://github.com/NickMortimer/sdcard.git
 cd sdcard
-conda create -n cardmanager-dev python=3.11
-conda activate cardmanager-dev
 pip install -e .
 ```
 
-## Requirements
-
-- Python 3.11+
-- Typer 0.14.0+ (latest CLI framework with enhanced features)
-- NumPy 2.0+
-- Pandas 2.2+
-- SciPy 1.13+
-- OpenCV 4.10+
-- Rich 13.7+ (enhanced terminal output, included with Typer[all])
-- Click 8.1+ (CLI foundation, dependency of Typer)
-- Cookiecutter 2.5+ (for field trip project templates)
-
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+MIT
