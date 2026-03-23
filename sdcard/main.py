@@ -272,6 +272,7 @@ def register_command(
         all: bool = typer.Option(False, help="Execute the command and print logging to the terminal, but do not change any files."),
         dry_run: bool = typer.Option(False, help="Execute the command and print logging to the terminal, but do not change any files."),
         overwrite:bool = typer.Option(False, help="Overwrite import.yaml"),
+    prompt_card_details: bool = typer.Option(False, "--card-details", help="Prompt for optional card manufacturer and rated UHS metadata"),
         cardsize:int = typer.Option(512, help="maximum card size"),
         format_type:str = typer.Option('exfat', help="Card format type"),
 ):
@@ -286,15 +287,71 @@ def register_command(
             card_number = ['0'] * len(card_path)
     else:
         card_path = [Path(path) for path in card_path]
-    register_cards(config,card_number=card_number,card_path=card_path,dry_run=dry_run,overwrite=overwrite)
+    register_cards(
+        config,
+        card_number=card_number,
+        card_path=card_path,
+        dry_run=dry_run,
+        overwrite=overwrite,
+        prompt_card_details=prompt_card_details,
+    )
 
 @sdcard.command('list')
-def list_cards(format_type: str = "exfat"):
+def list_cards(
+    format_type: str = typer.Option("exfat", help="Card format type"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show reader and speed details"),
+):
     """List available SD cards"""
-    cards = get_available_cards(format_type)
-    for card in cards:
-        typer.echo(f"Reader Card: {card['card_number']} {card['host']}: {card['mountpoint']} ({card['size_gb']}GB)")
-    return cards
+    if not verbose:
+        cards = get_available_cards(format_type)
+        for card in cards:
+            typer.echo(f"Reader Card: {card['card_number']} {card['host']}: {card['mountpoint']} ({card['size_gb']}GB)")
+        return cards
+
+    usb_cards, _ = get_complete_usb_card_info(destination_path=None, format_type=format_type)
+    listed_cards = []
+
+    for _, card in usb_cards.iterrows():
+        if card.get('device_type') == 'destination':
+            continue
+
+        mountpoint = card['mountpoint']
+        import_yml_path = Path(mountpoint) / "import.yml"
+        card_number = get_card_number_from_import_yml(import_yml_path)
+
+        listed_card = {
+            'card_number': card_number,
+            'mountpoint': mountpoint,
+            'size': card.get('size'),
+            'fstype': card.get('fstype'),
+            'reader_manufacturer': card.get('reader_manufacturer') or 'Unknown',
+            'reader_product': card.get('reader_product') or 'Unknown',
+            'reader_speed': card.get('reader_speed') or 'Unknown',
+            'reader_speed_mbps': card.get('reader_speed_mbps') or 0,
+            'actual_transfer_rate': card.get('actual_transfer_rate') or 0,
+            'thunderbolt_connected': bool(card.get('thunderbolt_connected', False)),
+            'thunderbolt_info': card.get('thunderbolt_info') or 'Standard USB',
+        }
+        listed_cards.append(listed_card)
+
+        typer.echo(
+            f"Reader Card: {card_number} {mountpoint} "
+            f"({listed_card['size']}, {listed_card['fstype']})"
+        )
+        typer.echo(
+            f"  Reader: {listed_card['reader_manufacturer']} {listed_card['reader_product']}"
+        )
+        typer.echo(
+            f"  USB Speed: {listed_card['reader_speed']} ({listed_card['reader_speed_mbps']} Mbps)"
+        )
+        typer.echo(
+            f"  Estimated Transfer: {listed_card['actual_transfer_rate']:.1f} MB/s"
+        )
+        typer.echo(
+            f"  Connection: {listed_card['thunderbolt_info']}"
+        )
+
+    return listed_cards
 
 
 @sdcard.command('import')
@@ -304,6 +361,8 @@ def import_command(
         copy: bool = typer.Option(True, help="Copy source (default)", show_default=True),
         move: bool = typer.Option(False, help="Move source and delete after copy"),
         find: bool = typer.Option(True, help="Reuse an existing destination that matches the import token"),
+    allow_overwrite: bool = typer.Option(False, "--allow-overwrite", help="Allow overwriting changed files at destination (unsafe)"),
+    check: bool = typer.Option(False, "--check", help="Check all cards for conflicts only; do not copy or move"),
         card_size: int = typer.Option(512, help="Maximum card size to auto-detect"),
         format_type: str = typer.Option('exfat', help="Card format type"),
         dry_run: bool = typer.Option(False, help="Show actions without changing files"),
@@ -325,6 +384,8 @@ def import_command(
         copy=copy,
         move=move,
         find=find,
+        allow_overwrite=allow_overwrite,
+        check=check,
         dry_run=dry_run,
         file_extension=file_extension,
         format_card=format_card,

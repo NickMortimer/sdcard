@@ -12,6 +12,7 @@ sdcard = "sdcard.main:sdcard"
 [tool.poetry.dependencies]
 python = "^3.11"
 typer = {extras = ["all"], version = "^0.14.0"}
+click = ">=8.0,<8.2"
 pandas = "^2.2.0"
 psutil = "^5.9.8"
 pyyaml = "^6.0"
