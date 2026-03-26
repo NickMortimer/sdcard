@@ -6,6 +6,7 @@ from typer.testing import CliRunner
 import typer
 import platform
 import sys
+import os
 from pathlib import Path
 from sdcard.config import Config  
 from sdcard.main import sdcard
@@ -17,12 +18,279 @@ from sdcard.utils.usb import (
     calculate_real_transfer_rate,
     get_usb_hierarchy_info
 )
-from sdcard.utils.cards import get_available_cards
+from sdcard.utils.cards_discovery import get_available_cards
 from collections import defaultdict
+import queue
+import re
+import threading
+import time
+from rich.live import Live
+from rich.table import Table
+from rich.text import Text
 
 sdall = typer.Typer(
     name="Import all SD cards",
 )
+
+
+def _run_parallel_import_workers(
+    worker_assignments: dict[str, list[str]],
+    clean: bool,
+    config_path: str | None,
+    quiet_workers: bool,
+    precheck: bool,
+) -> None:
+    """Run import workers as child processes and show a live per-card status table."""
+    processes: dict[str, subprocess.Popen] = {}
+    output_queue: queue.Queue[tuple[str, str]] = queue.Queue()
+    reader_threads: list[threading.Thread] = []
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    env["SDCARD_RCLONE_TABLE"] = "1"
+    card_state: dict[str, dict[str, str | int]] = {}
+    card_order: list[str] = []
+    current_card_by_worker: dict[str, str | None] = {}
+    worker_status: dict[str, str] = {}
+
+    def _status_style(status: str) -> str:
+        lowered = status.lower()
+        if lowered in {"queued"}:
+            return "grey62"
+        if lowered in {"done"}:
+            return "green"
+        if lowered in {"reading", "copying", "running", "working"}:
+            return "orange1"
+        if lowered in {"error", "failed"}:
+            return "red"
+        return "white"
+
+    def _build_worker_table() -> Table:
+        table = Table(title="Turbo Import Workers")
+        table.add_column("Worker", no_wrap=True)
+        table.add_column("Card")
+        table.add_column("Destination")
+        table.add_column("Speed", no_wrap=True)
+        table.add_column("Progress", no_wrap=True)
+        table.add_column("Status", no_wrap=True)
+        for card_key in card_order:
+            state = card_state[card_key]
+            status = str(state["status"])
+            style = _status_style(status)
+            table.add_row(
+                str(state["worker"]),
+                Text(str(state["card"]), style=style),
+                str(state["destination"]),
+                str(state["speed"]),
+                str(state["progress_bar"]),
+                Text(status, style=style),
+            )
+        return table
+
+    def _short_path(path_text: str, max_len: int = 40) -> str:
+        if len(path_text) <= max_len:
+            return path_text
+        return "..." + path_text[-(max_len - 3):]
+
+    def _progress_bar(percent: int, width: int = 18) -> str:
+        bounded = max(0, min(100, percent))
+        filled = round((bounded / 100) * width)
+        return f"{'#' * filled}{'-' * (width - filled)} {bounded:>3}%"
+
+    def _resolve_card_key(card_path: str) -> str:
+        card_path_obj = Path(card_path)
+        for known_card in card_state:
+            if Path(known_card) == card_path_obj:
+                return known_card
+        return card_path
+
+    def _update_worker_state(worker_name: str, line: str) -> None:
+        reading_match = re.match(r"^💾 Reading (\S+) from (.+) to (.+)$", line)
+        if reading_match:
+            _token, card_path, destination_path = reading_match.groups()
+            previous_card = current_card_by_worker.get(worker_name)
+            if previous_card and previous_card in card_state:
+                previous_state = card_state[previous_card]
+                if str(previous_state["status"]) in {"reading", "copying", "working"}:
+                    previous_state["status"] = "done"
+                    previous_state["progress_bar"] = _progress_bar(100)
+                    previous_state["speed"] = "-"
+
+            card_key = _resolve_card_key(card_path)
+            if card_key not in card_state:
+                card_state[card_key] = {
+                    "worker": worker_name,
+                    "card": _short_path(card_path, 24),
+                    "destination": "-",
+                    "speed": "-",
+                    "progress_bar": _progress_bar(0),
+                    "status": "queued",
+                }
+                card_order.append(card_key)
+
+            state = card_state[card_key]
+            state["destination"] = _short_path(destination_path, 40)
+            state["speed"] = "-"
+            state["progress_bar"] = _progress_bar(0)
+            state["status"] = "reading"
+            current_card_by_worker[worker_name] = card_key
+            worker_status[worker_name] = "working"
+            return
+        progress_match = re.search(
+            r"(\d{1,3})%,\s+([^,]+/s),\s+ETA",
+            line,
+        )
+        if progress_match:
+            card_key = current_card_by_worker.get(worker_name)
+            if not card_key or card_key not in card_state:
+                return
+            percent = int(progress_match.group(1))
+            speed = progress_match.group(2).strip()
+            state = card_state[card_key]
+            state["speed"] = speed
+            state["progress_bar"] = _progress_bar(percent)
+            state["status"] = "copying"
+            worker_status[worker_name] = "working"
+            return
+        if "error" in line.lower() or "failed" in line.lower():
+            card_key = current_card_by_worker.get(worker_name)
+            if not card_key or card_key not in card_state:
+                return
+            state = card_state[card_key]
+            state["speed"] = "-"
+            state["progress_bar"] = _short_path(line.strip(), 22)
+            state["status"] = "error"
+            worker_status[worker_name] = "error"
+
+    for worker_name, cards in worker_assignments.items():
+        current_card_by_worker[worker_name] = None
+        worker_status[worker_name] = "queued"
+        for card in cards:
+            if card in card_state:
+                continue
+            card_state[card] = {
+                "worker": worker_name,
+                "card": _short_path(card, 24),
+                "destination": "-",
+                "speed": "-",
+                "progress_bar": _progress_bar(0),
+                "status": "queued",
+            }
+            card_order.append(card)
+
+    def _stream_worker_output(worker_name: str, process: subprocess.Popen) -> None:
+        if process.stdout is None:
+            return
+        for line in process.stdout:
+            output_queue.put((worker_name, line.rstrip("\r\n")))
+        process.stdout.close()
+
+    for worker_name, cards in worker_assignments.items():
+        if not cards:
+            continue
+
+        command = [sys.executable, "-m", "sdcard.main", "import", *cards]
+        if clean:
+            command.append("--move")
+        if precheck:
+            command.append("--precheck")
+        if config_path:
+            command.extend(["--config-path", config_path])
+
+        process = subprocess.Popen(
+            command,
+            env=env,
+            stdout=subprocess.DEVNULL if quiet_workers else subprocess.PIPE,
+            stderr=subprocess.DEVNULL if quiet_workers else subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        processes[worker_name] = process
+        worker_status[worker_name] = "running"
+        if not quiet_workers:
+            thread = threading.Thread(
+                target=_stream_worker_output,
+                args=(worker_name, process),
+                daemon=True,
+            )
+            thread.start()
+            reader_threads.append(thread)
+        print(f"   ✅ Launched {worker_name} for {len(cards)} cards")
+
+    if not processes:
+        print("❌ No import processes were launched")
+        return
+
+    print()
+    print(f"🚀 Running {len(processes)} worker process(es) in this terminal")
+    print(f"🗂️ Tracking {len(card_order)} card(s) with worker mapping")
+    if quiet_workers:
+        print("🔇 Worker output is hidden (--quiet-workers); showing status only")
+    else:
+        print("💡 Live import status is shown below as a table")
+
+    live_context = Live(_build_worker_table(), refresh_per_second=4) if not quiet_workers else None
+    if live_context is None:
+        while processes:
+            for worker_name, process in list(processes.items()):
+                return_code = process.poll()
+                if return_code is not None:
+                    status_icon = "✅" if return_code == 0 else "❌"
+                    print(f"{status_icon} {worker_name} finished with exit code {return_code}")
+                    processes.pop(worker_name, None)
+            if processes:
+                time.sleep(0.2)
+    else:
+        with live_context as live:
+            while processes:
+                try:
+                    while True:
+                        worker_name, line = output_queue.get_nowait()
+                        if line:
+                            _update_worker_state(worker_name, line)
+                except queue.Empty:
+                    pass
+
+                for worker_name, process in list(processes.items()):
+                    return_code = process.poll()
+                    if return_code is not None:
+                        current_card = current_card_by_worker.get(worker_name)
+                        if current_card and current_card in card_state:
+                            current_state = card_state[current_card]
+                            if return_code == 0 and str(current_state["status"]) in {"reading", "copying", "working"}:
+                                current_state["status"] = "done"
+                                current_state["progress_bar"] = _progress_bar(100)
+                                current_state["speed"] = "-"
+                            elif return_code != 0 and str(current_state["status"]) != "done":
+                                current_state["status"] = "error"
+                                current_state["speed"] = "-"
+
+                        for card_key in card_order:
+                            state = card_state[card_key]
+                            if state["worker"] != worker_name:
+                                continue
+                            if str(state["status"]) == "queued":
+                                if return_code == 0:
+                                    state["status"] = "done"
+                                    state["progress_bar"] = _progress_bar(100)
+                                else:
+                                    state["status"] = "failed"
+
+                        worker_status[worker_name] = "done" if return_code == 0 else "failed"
+                        if return_code == 0:
+                            current_card_by_worker[worker_name] = None
+                        processes.pop(worker_name, None)
+
+                live.update(_build_worker_table())
+                if processes:
+                    time.sleep(0.2)
+
+        for worker_name in sorted(worker_status):
+            status = worker_status[worker_name]
+            status_icon = "✅" if status == "done" else "❌"
+            print(f"{status_icon} {worker_name} {status}")
+
+    for thread in reader_threads:
+        thread.join(timeout=0.5)
 
 @sdall.command('probe')
 def probe(config_path: str = typer.Option(None, help="Path to config directory."),
@@ -291,12 +559,13 @@ def import_all(config_path: str = typer.Option(None, help="Path to config direct
          format_type:str = typer.Option('exfat', help="Card format type"),
          card_size:int = typer.Option(512, help="maximum card size"),
          clean:bool = typer.Option(False, help="move all the files to location"),
+         precheck: bool = typer.Option(False, "--precheck", help="Run destination conflict prechecks before copy/move"),
+         quiet_workers: bool = typer.Option(False, "--quiet-workers", help="Hide worker output and only show process status"),
          debug:bool = typer.Option(False, help="Card format type"),
         max_sd_speed:float = typer.Option(140.0, help="Maximum realistic SD card read speed in MB/s (auto-detect if not specified)"),
          dest_write_speed:float = typer.Option(None, help="Override destination drive write speed in MB/s (auto-detect if not specified)")):
     
     if platform.system() == "Linux":
-        processes = set()
         runner = CliRunner()
         config = Config(config_path)
         destination_path = config.get_path('card_store')
@@ -395,18 +664,20 @@ def import_all(config_path: str = typer.Option(None, help="Path to config direct
         for i, group in enumerate(grouped_cards.values()):
             reader_key = f"reader_{i % max_processes}"
             reader_groups[reader_key].extend([card['mountpoint'] for card in group])
-        for cards in reader_groups.values():
-            # Launch process for this reader's cards
-            venv_path = Path(sys.prefix)
-            cards_str = " ".join(cards)
-            clean_flag = " --clean" if clean else ""
-            cmd = f'gnome-terminal -- bash --login -c "export PATH={venv_path}/bin:$PATH && sdcard import {cards_str}{clean_flag}"'
-            proc = subprocess.Popen(shlex.split(cmd))
-            processes.add(proc)
-            print(f"   ✅ Launched import process for {len(cards)} cards")        
+        worker_assignments = {
+            worker_name: list(cards)
+            for worker_name, cards in reader_groups.items()
+            if cards
+        }
+        _run_parallel_import_workers(
+            worker_assignments,
+            clean=clean,
+            config_path=config_path,
+            quiet_workers=quiet_workers,
+            precheck=precheck,
+        )
     else:
         # Windows version - use existing get_available_cards function
-        processes = set()
         runner = CliRunner()
         
         # Get available cards using the existing function
@@ -446,39 +717,19 @@ def import_all(config_path: str = typer.Option(None, help="Path to config direct
             terminal_key = f"terminal_{i % max_processes}"
             terminal_assignments[terminal_key].append(drive)
         
-        # Launch terminals with their assigned drives
-        for terminal_key, assigned_drives in terminal_assignments.items():
-            if not assigned_drives:
-                continue
-                
-            if debug:
-                # In debug mode, process sequentially
-                for drive in assigned_drives:
-                    runner.invoke(sdcard, ["import", drive] + (['--clean'] if clean else []))
-            else:
-                # Launch PowerShell terminal with all assigned drives
-                drives_str = " ".join(assigned_drives)
-                clean_flag = " --clean" if clean else ""
-                
-                # Get current Python executable path
-                python_exe = sys.executable
-                
-                cmd = [
-                    "powershell",
-                    "-Command",
-                    f"Start-Process powershell -ArgumentList '-NoExit -Command \"& \\\"{python_exe}\\\" -m sdcard import {drives_str}{clean_flag}\"'"
-                ]
-                proc = subprocess.Popen(cmd)
-                processes.add(proc)
-                print(f"   ✅ Launched PowerShell terminal for {len(assigned_drives)} drives")
-
-        # Don't wait for PowerShell processes - they run independently for better performance
-        if processes:
-            print(f"🚀 Launched {len(processes)} PowerShell terminals")
-            print("💡 Check the PowerShell windows to monitor import progress")
-            print("⚡ Processes are running independently for maximum performance")
-        else:
-            print("❌ No import processes were launched")
+        # Launch worker processes directly instead of opening terminal windows
+        worker_assignments = {
+            worker_name: list(drives)
+            for worker_name, drives in terminal_assignments.items()
+            if drives
+        }
+        _run_parallel_import_workers(
+            worker_assignments,
+            clean=clean,
+            config_path=config_path,
+            quiet_workers=quiet_workers,
+            precheck=precheck,
+        )
         
         print("✅ Import orchestration completed!")
 

@@ -9,6 +9,16 @@ Minimal, instrument-agnostic SD card helper for probing, registering, and import
 - Import (copy/move) cards into a configurable `card_store`
 - Turbo: fan out imports across multiple terminals on Linux
 
+## Utilities module map
+
+The `sdcard.utils` package is split by responsibility:
+
+- `cards_discovery.py`: SD card/USB discovery helpers (`list_sdcards`, `get_available_cards`, `get_usb_info`)
+- `import_conflicts.py`: destination comparison, conflict reporting, and overwrite safety prompts
+- `import_metadata.py`: import metadata rendering/writing (`import.yml`, destination `README.md`, register helpers)
+- `import_transfer.py`: copy/move import orchestration and transfer execution
+- `usb.py`: USB topology and throughput analysis used by `probe` and `turbo`
+
 ## Installation
 
 ```bash
