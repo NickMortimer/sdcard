@@ -1,37 +1,109 @@
-from unicodedata import name
-import pandas as pd
-import subprocess
-import shlex
-from typer.testing import CliRunner
 import typer
 import platform
+import subprocess
 import sys
 import os
-from pathlib import Path
-from sdcard.config import Config  
-from sdcard.main import sdcard
-from sdcard.utils.usb import (
-    get_complete_usb_card_info, 
-    scan_thunderbolt_ports, 
-    detect_thunderbolt_upstream_capacity,
-    analyze_destination_capacity,
-    calculate_real_transfer_rate,
-    get_usb_hierarchy_info
-)
-from sdcard.utils.cards_discovery import get_available_cards
-from collections import defaultdict
+import yaml
 import queue
-import re
 import threading
 import time
+from pathlib import Path
+from collections import defaultdict
+from typer.testing import CliRunner
+from sdcard.config import Config
+from sdcard.utils.cards_discovery import get_available_cards
+from sdcard.utils.usb import (
+    get_complete_usb_card_info, scan_thunderbolt_ports, detect_thunderbolt_upstream_capacity,
+    analyze_destination_capacity, calculate_real_transfer_rate, get_usb_hierarchy_info
+)
 from rich.live import Live
 from rich.table import Table
 from rich.text import Text
+import re
 
-sdall = typer.Typer(
-    name="Import all SD cards",
-)
 
+def _card_passes_import_check(
+    card_path: str,
+    config_path: str | None,
+    update: bool,
+) -> tuple[bool, str]:
+    command = [sys.executable, "-m", "sdcard.main", "import", card_path, "--check"]
+    if update:
+        command.append("--update")
+    if config_path:
+        command.extend(["--config-path", config_path])
+
+    result = subprocess.run(command, capture_output=True, text=True)
+    output = "\n".join(
+        line for line in [result.stdout.strip(), result.stderr.strip()] if line
+    )
+    return result.returncode == 0, output
+
+
+def _filter_cards_with_check(
+    card_paths: list[str],
+    config_path: str | None,
+    update: bool,
+) -> tuple[list[str], list[str]]:
+    if not card_paths:
+        return [], []
+
+    allowed_cards: list[str] = []
+    blocked_cards: list[str] = []
+
+    print(f"🔎 Running --check preflight for {len(card_paths)} card(s)")
+    for card_path in card_paths:
+        import_yml_path = Path(card_path) / "import.yml"
+        if not import_yml_path.exists():
+            blocked_cards.append(card_path)
+            print(f"⛔ Missing import.yml, skipping card: {card_path}")
+            continue
+
+        ok, output = _card_passes_import_check(card_path, config_path, update)
+        if ok:
+            allowed_cards.append(card_path)
+            print(f"✅ Check passed: {card_path}")
+            continue
+
+        blocked_cards.append(card_path)
+        print(f"⛔ Check failed, skipping card: {card_path}")
+        if output:
+            tail_lines = output.splitlines()[-10:]
+            print("--- check output (last 10 lines) ---")
+            print("\n".join(tail_lines))
+
+    return allowed_cards, blocked_cards
+
+
+def _card_has_remaining_payload_files(card_path: str) -> bool:
+    """Return True when card still has payload files after a clean move.
+
+    import.yml is expected to remain on cards, so it is ignored here.
+    """
+    root = Path(card_path)
+    if not root.exists() or not root.is_dir():
+        return False
+
+    for dirpath, _dirnames, filenames in os.walk(root):
+        base_dir = Path(dirpath)
+        for filename in filenames:
+            file_path = base_dir / filename
+            try:
+                rel = str(file_path.relative_to(root)).replace("\\", "/")
+            except Exception:
+                rel = filename
+
+            lowered = rel.lower()
+            basename = Path(lowered).name
+            if basename == "import.yml":
+                continue
+            if lowered.startswith('.trash-'):
+                continue
+            if lowered.endswith('.trashinfo'):
+                continue
+            return True
+
+    return False
 
 def _run_parallel_import_workers(
     worker_assignments: dict[str, list[str]],
@@ -39,6 +111,8 @@ def _run_parallel_import_workers(
     config_path: str | None,
     quiet_workers: bool,
     precheck: bool,
+    ignore_errors: bool = False,
+    update: bool = False,
 ) -> None:
     """Run import workers as child processes and show a live per-card status table."""
     processes: dict[str, subprocess.Popen] = {}
@@ -190,30 +264,46 @@ def _run_parallel_import_workers(
 
         command = [sys.executable, "-m", "sdcard.main", "import", *cards]
         if clean:
-            command.append("--move")
+            command.append("--clean")
         if precheck:
             command.append("--precheck")
+        if update:
+            command.append("--update")
         if config_path:
             command.extend(["--config-path", config_path])
+        if ignore_errors:
+            command.append("--ignore-errors")
 
         process = subprocess.Popen(
             command,
             env=env,
-            stdout=subprocess.DEVNULL if quiet_workers else subprocess.PIPE,
-            stderr=subprocess.DEVNULL if quiet_workers else subprocess.STDOUT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
         )
         processes[worker_name] = process
         worker_status[worker_name] = "running"
-        if not quiet_workers:
-            thread = threading.Thread(
-                target=_stream_worker_output,
-                args=(worker_name, process),
-                daemon=True,
-            )
-            thread.start()
-            reader_threads.append(thread)
+        def _capture_and_print(worker_name, process):
+            output = []
+            if process.stdout is not None:
+                for line in process.stdout:
+                    output.append(line.rstrip("\r\n"))
+                    if not quiet_workers:
+                        output_queue.put((worker_name, line.rstrip("\r\n")))
+                process.stdout.close()
+            process.wait()
+            if process.returncode != 0:
+                print(f"\n❌ Worker {worker_name} failed with exit code {process.returncode}")
+                print(f"--- Worker {worker_name} output ---")
+                print("\n".join(output))
+        thread = threading.Thread(
+            target=_capture_and_print,
+            args=(worker_name, process),
+            daemon=True,
+        )
+        thread.start()
+        reader_threads.append(thread)
         print(f"   ✅ Launched {worker_name} for {len(cards)} cards")
 
     if not processes:
@@ -234,8 +324,19 @@ def _run_parallel_import_workers(
             for worker_name, process in list(processes.items()):
                 return_code = process.poll()
                 if return_code is not None:
-                    status_icon = "✅" if return_code == 0 else "❌"
-                    print(f"{status_icon} {worker_name} finished with exit code {return_code}")
+                    left_over_cards: list[str] = []
+                    if return_code == 0 and clean:
+                        for card_path in worker_assignments.get(worker_name, []):
+                            if _card_has_remaining_payload_files(card_path):
+                                left_over_cards.append(card_path)
+
+                    if left_over_cards:
+                        print(f"❌ {worker_name} finished with files left on {len(left_over_cards)} card(s)")
+                        for card_path in left_over_cards:
+                            print(f"   - {card_path}")
+                    else:
+                        status_icon = "✅" if return_code == 0 else "❌"
+                        print(f"{status_icon} {worker_name} finished with exit code {return_code}")
                     processes.pop(worker_name, None)
             if processes:
                 time.sleep(0.2)
@@ -247,16 +348,27 @@ def _run_parallel_import_workers(
                         worker_name, line = output_queue.get_nowait()
                         if line:
                             _update_worker_state(worker_name, line)
+                    
                 except queue.Empty:
                     pass
 
                 for worker_name, process in list(processes.items()):
                     return_code = process.poll()
                     if return_code is not None:
+                        left_over_cards: set[str] = set()
+                        if return_code == 0 and clean:
+                            for card_path in worker_assignments.get(worker_name, []):
+                                if _card_has_remaining_payload_files(card_path):
+                                    left_over_cards.add(card_path)
+
                         current_card = current_card_by_worker.get(worker_name)
                         if current_card and current_card in card_state:
                             current_state = card_state[current_card]
-                            if return_code == 0 and str(current_state["status"]) in {"reading", "copying", "working"}:
+                            if current_card in left_over_cards:
+                                current_state["status"] = "failed"
+                                current_state["progress_bar"] = "files left"
+                                current_state["speed"] = "-"
+                            elif return_code == 0 and str(current_state["status"]) in {"reading", "copying", "working"}:
                                 current_state["status"] = "done"
                                 current_state["progress_bar"] = _progress_bar(100)
                                 current_state["speed"] = "-"
@@ -268,6 +380,11 @@ def _run_parallel_import_workers(
                             state = card_state[card_key]
                             if state["worker"] != worker_name:
                                 continue
+                            if card_key in left_over_cards:
+                                state["status"] = "failed"
+                                state["speed"] = "-"
+                                state["progress_bar"] = "files left"
+                                continue
                             if str(state["status"]) == "queued":
                                 if return_code == 0:
                                     state["status"] = "done"
@@ -275,7 +392,9 @@ def _run_parallel_import_workers(
                                 else:
                                     state["status"] = "failed"
 
-                        worker_status[worker_name] = "done" if return_code == 0 else "failed"
+                        worker_status[worker_name] = (
+                            "done" if return_code == 0 and not left_over_cards else "failed"
+                        )
                         if return_code == 0:
                             current_card_by_worker[worker_name] = None
                         processes.pop(worker_name, None)
@@ -292,279 +411,25 @@ def _run_parallel_import_workers(
     for thread in reader_threads:
         thread.join(timeout=0.5)
 
-@sdall.command('probe')
-def probe(config_path: str = typer.Option(None, help="Path to config directory."),
-         format_type:str = typer.Option('exfat', help="Card format type"),
-         card_size:int = typer.Option(512, help="maximum card size"),
-         max_sd_speed:float = typer.Option(140.0, help="Maximum realistic SD card read speed in MB/s"),
-         dest_write_speed:float = typer.Option(None, help="Override destination drive write speed in MB/s (auto-detect if not specified)")):
-    """Probe and analyze USB device tree, SD cards, and system capabilities."""
-    
-    if platform.system() == "Linux":
-        config = Config(config_path)
-        destination_path = config.get_path('card_store')
-        # Get USB card info and available ports (filtered by size and format)
-        usb_cards, available_ports = get_complete_usb_card_info(destination_path, card_size, format_type)
-        
-        # Analyze destination drives with optional override
-        destinations = analyze_destination_capacity(usb_cards, dest_write_speed, destination_path)
-        
-        # Scan Thunderbolt ports (for display purposes)
-        thunderbolt_ports, thunderbolt_controllers = scan_thunderbolt_ports()
-        
-        # Use system-based Thunderbolt detection instead of boltctl analysis
-        thunderbolt_bandwidth = detect_thunderbolt_upstream_capacity()
-        
-        # Calculate realistic transfer rates based on SD card limitations
-        for i, row in usb_cards.iterrows():
-            # Cap transfer rate at SD card maximum
-            usb_cards.at[i, 'actual_transfer_rate'] = min(row['actual_transfer_rate'], max_sd_speed)
-            
-            # Add realistic single-card speed
-            usb_cards.at[i, 'realistic_single_speed'] = min(row['actual_transfer_rate'], max_sd_speed)
-        
-        # Calculate saturation based on realistic SD card speeds
-        saturation_info = None
-        if thunderbolt_bandwidth:
-            thunderbolt_devices = []
-            total_thunderbolt_demand = 0
-            
-            for _, card in usb_cards.iterrows():
-                if card.get('thunderbolt_connected', False):
-                    thunderbolt_devices.append(card)
-                    realistic_speed = min(card.get('actual_transfer_rate', 0), max_sd_speed)
-                    total_thunderbolt_demand += realistic_speed
-            
-            upstream_capacity = thunderbolt_bandwidth.get('practical_usb_capacity_mbps', 0)
-            utilization_percentage = (total_thunderbolt_demand / upstream_capacity * 100) if upstream_capacity > 0 else 0
-            
-            saturation_info = {
-                'thunderbolt_devices': len(thunderbolt_devices),
-                'total_demand_mbps': total_thunderbolt_demand,
-                'upstream_capacity_mbps': upstream_capacity,
-                'utilization_percentage': utilization_percentage,
-                'is_saturated': utilization_percentage > 90,
-                'headroom_mbps': upstream_capacity - total_thunderbolt_demand,
-                'devices': thunderbolt_devices
-            }
-        
-        if usb_cards.empty:
-            print("No SD cards found")
-            return
-        
-        # Show analysis with emojis
-        print("🔍 Port Analysis:")
-        print("=" * 60)
-        
-        # Show destination drive analysis
-        if destinations:
-            print("💽 Destination Drive Analysis:")
-            for dest_mount, dest_info in destinations.items():
-                saturation_icon = "🔴" if dest_info['is_saturated'] else "🟢"
-                override_icon = "⚙️" if dest_info.get('speed_override') else ""
-                config_icon = "📋" if dest_info.get('using_global_config') else ""
-                
-                print(f"  🎯 {saturation_icon} {override_icon} {config_icon} {dest_mount} ({dest_info['drive_type']})")
-                print(f"     Device: {dest_info['device']}")
-                print(f"     Destination: {dest_info.get('destination_path', 'Unknown')}")
-                
-                if dest_info.get('using_global_config'):
-                    print(f"     Source: Global config (--config-path)")
-                else:
-                    print(f"     Source: Individual card import.yml files")
-                
-                if dest_info.get('speed_override'):
-                    print(f"     Write Speed: {dest_info['estimated_write_speed']:.0f} MB/s (USER OVERRIDE)")
-                else:
-                    print(f"     Estimated Write Speed: {dest_info['estimated_write_speed']:.0f} MB/s (min 200 MB/s)")
-                    
-                print(f"     Total Demand: {dest_info['total_demand']:.1f} MB/s from {len(dest_info['cards'])} cards")
-                print(f"     Utilization: {dest_info['utilization_percentage']:.1f}%")
-                
-                if dest_info['is_saturated']:
-                    print(f"     ⚠️  WARNING: Destination drive may be saturated!")
-                else:
-                    remaining = dest_info['estimated_write_speed'] - dest_info['total_demand']
-                    additional_cards = remaining / max_sd_speed if max_sd_speed > 0 else 0
-                    print(f"     ✅ Drive OK: Can handle ~{additional_cards:.1f} more cards")
-                print()
-        
-        # Show Thunderbolt analysis
-        if thunderbolt_bandwidth:
-            print("⚡ Thunderbolt System Analysis:")
-            print(f"  🔌 Controller: {thunderbolt_bandwidth.get('controller', 'Unknown')}")
-            print(f"  📊 Generation: {thunderbolt_bandwidth.get('generation', 'Unknown')}")
-            print(f"  💾 Max Speed: {thunderbolt_bandwidth.get('max_speed_gbps', 0):.0f} Gb/s")
-            print(f"  🔬 Practical USB Capacity: {thunderbolt_bandwidth.get('practical_usb_capacity_mbps', 0):.1f} MB/s")
-            
-            if saturation_info and saturation_info['thunderbolt_devices'] > 0:
-                saturation_icon = "🔴" if saturation_info['is_saturated'] else "🟢"
-                print(f"\n📈 Bandwidth Utilization:")
-                print(f"  {saturation_icon} Connected TB Devices: {saturation_info['thunderbolt_devices']}")
-                print(f"  📊 Total Demand: {saturation_info['total_demand_mbps']:.1f} MB/s")
-                print(f"  🎯 Utilization: {saturation_info['utilization_percentage']:.1f}%")
-                print(f"  🚀 Available Headroom: {saturation_info['headroom_mbps']:.1f} MB/s")
-            print()
-        
-        # Show card analysis
-        print("📱 SD Card Analysis:")
-        print("=" * 60)
-        
-        cards_without_config = []
-        
-        # Group cards by reader to detect dual-slot scenarios
-        reader_groups = {}
-        for _, card in usb_cards.iterrows():
-            if card.get('device_type') == 'destination':
-                continue
-                
-            reader_key = f"{card.get('reader_manufacturer', 'Unknown')}_{card.get('reader_product', 'Unknown')}"
-            hierarchy = get_usb_hierarchy_info(card['name'])
-            if 'card_reader' in hierarchy:
-                reader_path = hierarchy['card_reader'].get('usb_path', 'unknown')
-                reader_key = f"{reader_key}_{reader_path}"
-            
-            if reader_key not in reader_groups:
-                reader_groups[reader_key] = []
-            reader_groups[reader_key].append(card)
-        
-        for _, card in usb_cards.iterrows():
-            # Show destination drives separately
-            if card.get('device_type') == 'destination':
-                print(f"💽 🎯 {card['mountpoint']} ({card['size']}) - DESTINATION DRIVE")
-                print(f"    💾 Device: {card['name']}")
-                print(f"    📂 Filesystem: {card['fstype']}")
-                print(f"    🎯 This is where SD card content will be stored")
-                
-                # Add USB speed information for destination drive
-                if card.get('reader_manufacturer'):
-                    print(f"    📖 Connection: {card['reader_manufacturer']} {card['reader_product']}")
-                    print(f"       USB Speed: {card['reader_speed']} ({card['reader_speed_mbps']} Mbps)")
-                    usb_transfer_rate = card.get('actual_transfer_rate', 0)
-                    print(f"    ⚡ USB Transfer Rate: {usb_transfer_rate:.1f} MB/s")
-                else:
-                    print(f"    🔌 Connection: Internal/SATA (not USB)")
-                
-                # Show Thunderbolt status for destination if applicable
-                if card.get('thunderbolt_connected', False):
-                    print(f"    ⚡ Thunderbolt: {card.get('thunderbolt_info', 'Connected')}")
-                elif card.get('thunderbolt_info'):
-                    print(f"    🔌 Connection: {card.get('thunderbolt_info', 'Standard connection')}")
-                
-                print()
-                continue
-            
-            # Check for import.yml
-            mountpoint = card['mountpoint']
-            has_import_yml = (Path(mountpoint) / "import.yml").exists()
-            
-            if not has_import_yml:
-                cards_without_config.append(mountpoint)
-            
-            # Find reader group to check for dual-slot performance impact
-            reader_key = f"{card.get('reader_manufacturer', 'Unknown')}_{card.get('reader_product', 'Unknown')}"
-            hierarchy = get_usb_hierarchy_info(card['name'])
-            if 'card_reader' in hierarchy:
-                reader_path = hierarchy['card_reader'].get('usb_path', 'unknown')
-                reader_key = f"{reader_key}_{reader_path}"
-            
-            cards_in_reader = reader_groups.get(reader_key, [card])
-            is_dual_slot = len(cards_in_reader) > 1
-            
-            usb_limited_speed = card.get('actual_transfer_rate', 0)
-            is_usb_optimal = usb_limited_speed <= max([calculate_real_transfer_rate(p['speed_mbps']) for p in available_ports]) * 0.9 if available_ports else True
-            realistic_speed = min(usb_limited_speed, max_sd_speed)
-            
-            # Apply dual-slot penalty - reading two cards is slower than one!
-            if is_dual_slot:
-                dual_slot_factor = 0.6  # 40% slower when reading two cards
-                realistic_speed *= dual_slot_factor
-            
-            icon = "✅" if is_usb_optimal else "⚠️"
-            tb_icon = "⚡" if card.get('thunderbolt_connected', False) else "🔌"
-            speed_limited_icon = "🐌" if usb_limited_speed > max_sd_speed else ""
-            config_icon = "❌" if not has_import_yml else ""
-            dual_slot_icon = "👥" if is_dual_slot else ""
-            
-            print(f"{icon} {tb_icon} {speed_limited_icon} {config_icon} {dual_slot_icon} {card['mountpoint']} ({card['size']})")
-            
-            if not has_import_yml:
-                print(f"    ❌ WARNING: Missing import.yml configuration file!")
-                print(f"       This card will be SKIPPED during processing")
-            
-            if is_dual_slot:
-                print(f"    👥 DUAL-SLOT READER: {len(cards_in_reader)} cards in same reader")
-            
-            if card.get('thunderbolt_connected', False):
-                print(f"    ⚡ Thunderbolt: {card.get('thunderbolt_info', 'Connected')}")
-            else:
-                print(f"    🔌 Connection: {card.get('thunderbolt_info', 'Standard USB')}")
-            
-            if card.get('reader_manufacturer'):
-                print(f"    📖 Reader: {card['reader_manufacturer']} {card['reader_product']}")
-                print(f"       USB Speed: {card['reader_speed']} ({card['reader_speed_mbps']} Mbps)")
-            
-            print(f"    ⚡ USB Transfer Rate: {usb_limited_speed:.1f} MB/s")
-            if is_dual_slot:
-                original_speed = min(usb_limited_speed, max_sd_speed)
-                print(f"    🎯 Single-card Speed: {original_speed:.1f} MB/s")
-                print(f"    👥 Dual-slot Speed: {realistic_speed:.1f} MB/s (reduced due to sharing)")
-            else:
-                print(f"    🎯 Realistic Speed: {realistic_speed:.1f} MB/s (SD card limited)")
-            print()
-            
-    else:
-        # Windows version - use existing get_available_cards function        
-        # Get available cards using the existing function
-        drives_info = get_available_cards(format_type, card_size)
-        
-        # Filter for cards with import.yml and extract mountpoints
-        valid_drives = []
-        cards_without_config = []
-        
-        for drive_info in drives_info:
-            mountpoint = drive_info['mountpoint']
-            import_yml_path = Path(mountpoint) / "import.yml"
-            
-            if import_yml_path.exists():
-                valid_drives.append(mountpoint)
-            else:
-                cards_without_config.append(mountpoint)
-        
-        # Show warning for cards without config
-        if cards_without_config:
-            print("⚠️  CONFIGURATION WARNINGS:")
-            print("=" * 60)
-            print(f"❌ {len(cards_without_config)} SD cards missing import.yml configuration:")
-            for card_path in cards_without_config:
-                print(f"   • {card_path}")
-            print()
-            print("💡 These cards will be SKIPPED during import processing.")
-            print("   Create import.yml files to include them in the import.")
-            print()
-        
-        if not valid_drives:
-            print("❌ No valid Windows drives found for import")
-            return
-        
-        print(f"📊 Found {len(valid_drives)} Windows drives with import.yml")
-        for drive in valid_drives:
-            print(f"   ✅ {drive}")
-    
-    print("✅ Probe analysis completed!")
 
-@sdall.command('import_all')
-def import_all(config_path: str = typer.Option(None, help="Path to config directory."),
+def turbo(config_path: str = typer.Option(None, help="Path to config directory."),
          max_processes:int = typer.Option(4, help="Number of concurrent transfers"),
          format_type:str = typer.Option('exfat', help="Card format type"),
          card_size:int = typer.Option(512, help="maximum card size"),
          clean:bool = typer.Option(False, help="move all the files to location"),
+         check: bool = typer.Option(False, "--check", help="Preflight each card and skip cards that have copy conflicts"),
+         update: bool = typer.Option(False, "--update", help="Allow newer source files to update older destination files"),
          precheck: bool = typer.Option(False, "--precheck", help="Run destination conflict prechecks before copy/move"),
          quiet_workers: bool = typer.Option(False, "--quiet-workers", help="Hide worker output and only show process status"),
+         ignore_errors: bool = typer.Option(False, "--ignore-errors", help="Pass --ignore-errors to rsync and continue on file errors"),
          debug:bool = typer.Option(False, help="Card format type"),
-        max_sd_speed:float = typer.Option(140.0, help="Maximum realistic SD card read speed in MB/s (auto-detect if not specified)"),
+         max_sd_speed:float = typer.Option(140.0, help="Maximum realistic SD card read speed in MB/s"),
          dest_write_speed:float = typer.Option(None, help="Override destination drive write speed in MB/s (auto-detect if not specified)")):
-    
+    """
+    This command orchestrates the import process for ALL detected SD cards,
+    launching multiple processes to handle concurrent imports.
+    It supports both Linux and Windows environments.
+    """
     if platform.system() == "Linux":
         runner = CliRunner()
         config = Config(config_path)
@@ -632,6 +497,9 @@ def import_all(config_path: str = typer.Option(None, help="Path to config direct
             
             hierarchy = get_usb_hierarchy_info(card['name'])
             if (Path(card['mountpoint']) / "import.yml").exists():
+                import_yml_path = Path(card['mountpoint']) / "import.yml"
+                raw_data = yaml.safe_load(import_yml_path.read_text(encoding='utf-8'))
+                card['card_number'] = raw_data['card_number'] if 'card_number' in raw_data else 0
                 if 'card_reader' in hierarchy:
                     reader_path = hierarchy['card_reader'].get('usb_path', 'unknown')
                     reader_id = f"{reader_id}_{reader_path}"
@@ -663,18 +531,33 @@ def import_all(config_path: str = typer.Option(None, help="Path to config direct
         # Round-robin distribute group values (lists of strings) to readers
         for i, group in enumerate(grouped_cards.values()):
             reader_key = f"reader_{i % max_processes}"
-            reader_groups[reader_key].extend([card['mountpoint'] for card in group])
+            group_mounts = [card['mountpoint'] for card in group]
+            if check:
+                allowed_cards, blocked_cards = _filter_cards_with_check(
+                    group_mounts,
+                    config_path,
+                    update,
+                )
+                if blocked_cards:
+                    print(f"⚠️ Skipped {len(blocked_cards)} card(s) on check failure for {reader_key}")
+                group_mounts = allowed_cards
+            reader_groups[reader_key].extend(group_mounts)
         worker_assignments = {
             worker_name: list(cards)
             for worker_name, cards in reader_groups.items()
             if cards
         }
+        if not worker_assignments:
+            print("⛔ No cards passed --check preflight")
+            return
         _run_parallel_import_workers(
             worker_assignments,
             clean=clean,
             config_path=config_path,
             quiet_workers=quiet_workers,
             precheck=precheck,
+            ignore_errors=ignore_errors,
+            update=update,
         )
     else:
         # Windows version - use existing get_available_cards function
@@ -715,6 +598,14 @@ def import_all(config_path: str = typer.Option(None, help="Path to config direct
         # Round-robin distribute drives to terminals
         for i, drive in enumerate(valid_drives):
             terminal_key = f"terminal_{i % max_processes}"
+            if check:
+                allowed_cards, _blocked_cards = _filter_cards_with_check(
+                    [drive],
+                    config_path,
+                    update,
+                )
+                if not allowed_cards:
+                    continue
             terminal_assignments[terminal_key].append(drive)
         
         # Launch worker processes directly instead of opening terminal windows
@@ -723,17 +614,18 @@ def import_all(config_path: str = typer.Option(None, help="Path to config direct
             for worker_name, drives in terminal_assignments.items()
             if drives
         }
+        if not worker_assignments:
+            print("⛔ No cards passed --check preflight")
+            return
         _run_parallel_import_workers(
             worker_assignments,
             clean=clean,
             config_path=config_path,
             quiet_workers=quiet_workers,
             precheck=precheck,
+            ignore_errors=ignore_errors,
+            update=update,
         )
         
         print("✅ Import orchestration completed!")
 
-# === AI DO NOT EDIT START ===
-if __name__ == "__main__":
-    sdall()
-# === AI DO NOT EDIT END ===

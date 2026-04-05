@@ -4,30 +4,290 @@ import logging
 import os
 import platform
 import shlex
+import shutil
 import subprocess
+import tempfile
+import threading
 import typer
 import uuid
 import yaml
 import psutil
 from sdcard.config import DEFAULT_IMPORT_TEMPLATE
-from sdcard.utils.import_conflicts import (
-    _collect_destination_conflicts,
-    _prompt_for_new_token_if_destination_changed,
-    _write_conflict_report,
-)
+from sdcard.utils.import_conflicts import _collect_destination_conflicts
 from sdcard.utils.import_metadata import _resolve_destination_path_template, make_yml
 
 
-def import_cards(config, card_path, copy, move, find, file_extension, dry_run: bool, format_card=False, allow_overwrite: bool = False, check: bool = False, precheck: bool = False):
-    """Copy or move SD card contents to the configured card store."""
+def _compress_bytes_zstd(raw_bytes: bytes) -> bytes:
+    try:
+        import compression.zstd as std_zstd
+        return std_zstd.compress(raw_bytes)
+    except ImportError:
+        pass
+
+    import zstandard
+    return zstandard.ZstdCompressor(level=3).compress(raw_bytes)
+
+
+def _write_file_times_manifest(root_path: Path, output_path: Path) -> None:
+    lines: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root_path):
+        dirnames.sort()
+        filenames.sort()
+        for filename in filenames:
+            file_path = Path(dirpath) / filename
+            stat_result = file_path.stat()
+            timestamp = datetime.fromtimestamp(stat_result.st_mtime).isoformat(sep=" ", timespec="microseconds")
+            lines.append(f"{file_path} {timestamp}")
+
+    payload = ("\n".join(lines) + "\n").encode("utf-8")
+    compressed = _compress_bytes_zstd(payload)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(delete=False, dir=str(output_path.parent)) as temp_file:
+        temp_file.write(compressed)
+        temp_name = temp_file.name
+
+    Path(temp_name).replace(output_path)
+
+
+def _resolve_rsync_path(config) -> Path | str:
+    if platform.system() == "Windows":
+        bundled = config.catalog_dir / "bin" / "rsync.exe"
+        if bundled.exists():
+            return bundled
+    resolved = shutil.which("rsync")
+    if resolved:
+        return resolved
+    raise typer.Abort("rsync is required but was not found in PATH")
+
+
+def _rsync_dir_arg(path: Path | str) -> str:
+    normalized = str(Path(path).resolve()).replace("\\", "/")
+    if not normalized.endswith("/"):
+        normalized += "/"
+    return normalized
+
+
+def _build_rsync_command(
+    rsync_path: Path | str,
+    source: Path,
+    destination: Path,
+    dry_run: bool = False,
+    clean: bool = False,
+    update: bool = False,
+    ignore_errors: bool = False,
+) -> list[str]:
+    command = [
+        str(rsync_path),
+        "-a",
+        "--info=progress2",
+    ]
+    if update:
+        command.append("--update")
+    else:
+        command.extend(["--update", "--ignore-existing"])
+    if dry_run:
+        command.append("--dry-run")
+    if clean:
+        command.append("--remove-source-files")
+    if ignore_errors:
+        command.append("--ignore-errors")
+    command.extend([_rsync_dir_arg(source), _rsync_dir_arg(destination)])
+    return command
+
+
+def _run_rsync_command(command: list[str], dry_run: bool, operation_label: str) -> None:
+    """Run rsync, streaming progress output to stdout for live table visibility."""
+    logging.info("running %s", shlex.join(command))
+    if dry_run:
+        return
+
+    stderr_lines: list[str] = []
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        bufsize=0,
+    )
+
+    def _drain_stderr() -> None:
+        if process.stderr is None:
+            return
+        for raw in process.stderr:
+            stderr_lines.append(raw.decode(errors="replace").rstrip("\r\n"))
+        process.stderr.close()
+
+    stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+    stderr_thread.start()
+
+    # rsync --info=progress2 uses \r between updates on the same terminal line;
+    # split on both \r and \n so each progress update prints as a separate line.
+    buf = b""
+    if process.stdout is not None:
+        while True:
+            chunk = process.stdout.read(4096)
+            if not chunk:
+                break
+            buf += chunk
+            while True:
+                r_pos = buf.find(b"\r")
+                n_pos = buf.find(b"\n")
+                if r_pos == -1 and n_pos == -1:
+                    break
+                if r_pos == -1:
+                    sep = n_pos
+                elif n_pos == -1:
+                    sep = r_pos
+                else:
+                    sep = min(r_pos, n_pos)
+                line = buf[:sep].decode(errors="replace").strip()
+                buf = buf[sep + 1:]
+                if line:
+                    print(line, flush=True)
+        process.stdout.close()
+
+    if buf:
+        line = buf.decode(errors="replace").strip()
+        if line:
+            print(line, flush=True)
+
+    process.wait()
+    stderr_thread.join(timeout=1.0)
+
+    if process.returncode != 0:
+        typer.echo(f"❌ rsync {operation_label} failed (exit code {process.returncode}).")
+        if stderr_lines:
+            typer.echo("--- rsync stderr ---\n" + "\n".join(stderr_lines))
+        raise typer.Abort("See above for rsync error details.")
+
+
+def _is_source_newer_than_destination(
+    source_mod: object,
+    destination_mod: object,
+    tolerance_seconds: float = 1.0,
+) -> bool:
+    """Return True when source mtime is newer than destination by tolerance."""
+    if source_mod is None or destination_mod is None:
+        return False
+    try:
+        return (float(source_mod) - float(destination_mod)) > tolerance_seconds
+    except Exception:
+        return False
+
+
+def _precheck_conflicts(
+    source: Path,
+    destination: Path,
+    update: bool = False,
+) -> dict[str, object]:
+    if not destination.exists():
+        return {
+            "conflicts": [],
+            "likely_partial_files": [],
+            "overlapping_files": [],
+            "differing_files": [],
+        }
+
+    conflict_data = _collect_destination_conflicts(source, destination)
+    likely_partial_files = set(conflict_data.get("likely_partial_files", []))
+    source_metadata = conflict_data.get("source_metadata", {})
+    destination_metadata = conflict_data.get("destination_metadata", {})
+    differing_files = list(conflict_data.get("differing_files", []))
+    update_allowed_files: list[str] = []
+    if update:
+        conflicts = []
+        for rel_path in differing_files:
+            if rel_path in likely_partial_files:
+                continue
+            source_mod = source_metadata.get(rel_path, {}).get("mod_time")
+            destination_mod = destination_metadata.get(rel_path, {}).get("mod_time")
+            if _is_source_newer_than_destination(source_mod, destination_mod):
+                update_allowed_files.append(rel_path)
+                continue
+            conflicts.append(rel_path)
+        conflicts = sorted(conflicts)
+        update_allowed_files = sorted(update_allowed_files)
+    else:
+        conflicts = sorted(
+            [
+                rel_path
+                for rel_path in differing_files
+                if rel_path not in likely_partial_files
+            ]
+        )
+    return {
+        "conflicts": conflicts,
+        "update_allowed_files": update_allowed_files,
+        "likely_partial_files": sorted(likely_partial_files),
+        "overlapping_files": conflict_data.get("overlapping_files", []),
+        "differing_files": differing_files,
+    }
+
+
+def _remove_empty_source_directories(source_root: Path) -> None:
+    for dirpath, _dirnames, _filenames in os.walk(source_root, topdown=False):
+        current = Path(dirpath)
+        if current == source_root:
+            continue
+        try:
+            current.rmdir()
+        except OSError:
+            continue
+
+
+def _source_matches_destination(
+    source_file: Path,
+    destination_file: Path,
+    tolerance_seconds: float = 1.0,
+) -> bool:
+    try:
+        source_stat = source_file.stat()
+        destination_stat = destination_file.stat()
+    except OSError:
+        return False
+
+    if source_stat.st_size != destination_stat.st_size:
+        return False
+
+    return abs(source_stat.st_mtime - destination_stat.st_mtime) <= tolerance_seconds
+
+
+def _delete_source_files_matching_destination(
+    source_root: Path,
+    destination_root: Path,
+) -> int:
+    deleted_count = 0
+    for dirpath, _dirnames, filenames in os.walk(source_root):
+        for filename in filenames:
+            source_file = Path(dirpath) / filename
+            relative_path = source_file.relative_to(source_root)
+            destination_file = destination_root / relative_path
+
+            if not destination_file.is_file():
+                continue
+
+            if not _source_matches_destination(source_file, destination_file):
+                continue
+
+            try:
+                source_file.unlink()
+                deleted_count += 1
+            except OSError:
+                continue
+
+    return deleted_count
+
+
+def import_cards(config, card_path, copy, clean, find, file_extension, dry_run: bool, format_card=False, allow_overwrite: bool = False, check: bool = False, update: bool = False, precheck: bool = False, ignore_errors: bool = False):
+    """Copy or move (clean) SD card contents to the configured card store."""
+    import pandas as pd
     _ = file_extension
     check_failures: list[str] = []
     check_checked = 0
 
     if check:
         copy = False
-        move = False
-        allow_overwrite = False
+        clean = False
 
     for card in card_path:
         check_checked += 1
@@ -89,87 +349,102 @@ def import_cards(config, card_path, copy, move, find, file_extension, dry_run: b
             if matches:
                 destination = max(matches)
 
-        typer.echo(f"💾 Reading {importdetails['import_token']} from {card} to {destination}")
-
-        if platform.system() == "Windows":
-            rclone_path = config.catalog_dir / 'bin' / 'rclone.exe'
-        else:
-            rclone_path = 'rclone'
+        source = Path(card)
+        typer.echo(f"💾 Reading {importdetails['import_token']} from {source} to {destination}")
 
         if check:
-            try:
-                conflict_data = _collect_destination_conflicts(Path(card), destination)
-            except Exception as exc:
-                check_failures.append(f"{card}: unable to compare source and destination ({exc})")
-                typer.echo(f"⛔ {card}: unable to compare source and destination")
-                continue
+            precheck_result = _precheck_conflicts(source, destination, update=update)
+            conflicts = precheck_result["conflicts"]
+            update_allowed_files = precheck_result["update_allowed_files"]
+            likely_partial_files = precheck_result["likely_partial_files"]
 
-            differing_files = conflict_data["differing_files"]
-            if differing_files:
-                import_token = str(importdetails.get("import_token", "unknown"))
-                report_path = _write_conflict_report(
-                    Path(config.catalog_dir) / "conflicts",
-                    Path(card),
-                    destination,
-                    import_token,
-                    conflict_data,
+            if conflicts:
+                check_failures.append(
+                    f"{card}: {len(conflicts)} overwrite conflict(s) detected"
                 )
-                check_failures.append(f"{card}: {len(differing_files)} changed file(s) -> {report_path}")
-                typer.echo(f"⛔ {card}: {len(differing_files)} changed file(s)")
-                typer.echo(f"   Report: {report_path}")
-                typer.echo("   Problem files (first 20):")
-                for rel_path in differing_files[:20]:
-                    typer.echo(f"   - {rel_path}")
-                if len(differing_files) > 20:
-                    typer.echo(f"   ... and {len(differing_files) - 20} more")
+                typer.echo(
+                    f"⛔ {card}: {len(conflicts)} overwrite conflict(s) detected"
+                )
+                for rel_path in conflicts[:10]:
+                    typer.echo(f"  - {rel_path}")
+                if len(conflicts) > 10:
+                    typer.echo(f"  ... and {len(conflicts) - 10} more")
             else:
                 typer.echo(f"✅ {card}: no overwrite conflicts detected")
+                if update and update_allowed_files:
+                    typer.echo(
+                        f"ℹ️ {card}: {len(update_allowed_files)} older destination file(s) can be updated"
+                    )
+                if likely_partial_files:
+                    typer.echo(
+                        f"ℹ️ {card}: {len(likely_partial_files)} likely partial destination file(s) ignored"
+                    )
             continue
 
-        overwrite_allowed_for_card = False
         if precheck:
-            try:
-                overwrite_allowed_for_card = _prompt_for_new_token_if_destination_changed(
-                    Path(card),
-                    destination,
-                    importdetails,
-                    rclone_path,
-                    allow_overwrite=allow_overwrite,
-                    prompt_overwrite=not dry_run,
+            precheck_result = _precheck_conflicts(source, destination, update=update)
+            conflicts = precheck_result["conflicts"]
+            update_allowed_files = precheck_result["update_allowed_files"]
+            likely_partial_files = precheck_result["likely_partial_files"]
+
+            if conflicts:
+                typer.echo(
+                    f"⛔ Found {len(conflicts)} overwrite conflict(s) before transfer:"
                 )
-            except typer.Abort:
-                raise
+                for rel_path in conflicts[:10]:
+                    typer.echo(f"  - {rel_path}")
+                if len(conflicts) > 10:
+                    typer.echo(f"  ... and {len(conflicts) - 10} more")
+                if not allow_overwrite:
+                    raise typer.Abort(
+                        "Precheck found destination conflicts. Use --allow-overwrite to continue anyway."
+                    )
+                typer.echo("⚠️ --allow-overwrite is set; continuing despite conflicts.")
+
+            if likely_partial_files:
+                typer.echo(
+                    f"ℹ️ Ignoring {len(likely_partial_files)} likely partial destination file(s)."
+                )
+            if update and update_allowed_files:
+                typer.echo(
+                    f"ℹ️ Allowing updates for {len(update_allowed_files)} older destination file(s)."
+                )
+
+        rsync_path = _resolve_rsync_path(config)
 
         if copy:
-            logging.info(f'{dry_run_log_string}  Copy  {card} --> {destination}')
-            immutable_flag = ""
-            if precheck and not (allow_overwrite or overwrite_allowed_for_card):
-                immutable_flag = " --immutable"
-            check_first_flag = " --check-first" if precheck else ""
-            progress_flags = "--stats-one-line --stats=1s -v" if os.environ.get("SDCARD_RCLONE_TABLE") else "--progress"
-            command = f"{rclone_path} copy {Path(card).resolve()} {destination.resolve()} {progress_flags} --update{check_first_flag} --low-level-retries 1 --modify-window=2s{immutable_flag} "
-            logging.info(f'running {command}')
-            command = command.replace('\\', '/')
-            logging.info(f'{dry_run_log_string}  {command}')
-            if not dry_run:
-                destination.mkdir(exist_ok=True, parents=True)
-                try:
-                    subprocess.run(shlex.split(command), check=True)
-                except subprocess.CalledProcessError as exc:
-                    raise typer.Abort(f"rclone copy failed (exit code {exc.returncode}). Import aborted before overwrite.")
+            logging.info(f'{dry_run_log_string}  Copy  {source} --> {destination}')
+            destination.mkdir(exist_ok=True, parents=True)
+            copy_command = _build_rsync_command(
+                rsync_path=rsync_path,
+                source=source,
+                destination=destination,
+                dry_run=dry_run,
+                clean=False,
+                update=update,
+                ignore_errors=ignore_errors,
+            )
+            _run_rsync_command(copy_command, dry_run=dry_run, operation_label="copy")
 
-        if move:
-            progress_flags = "--stats-one-line --stats=1s -v" if os.environ.get("SDCARD_RCLONE_TABLE") else "--progress"
-            check_first_flag = " --check-first" if precheck else ""
-            command = f"{rclone_path} move {card} {destination} {progress_flags} --update{check_first_flag} --delete-empty-src-dirs"
-            command = command.replace('\\', '/')
-            logging.info(f'{dry_run_log_string}  {command}')
+        if clean:
+            logging.info(f'{dry_run_log_string}  Clean  {source} --> {destination}')
+            destination.mkdir(exist_ok=True, parents=True)
+            clean_command = _build_rsync_command(
+                rsync_path=rsync_path,
+                source=source,
+                destination=destination,
+                dry_run=dry_run,
+                clean=True,
+                update=update,
+                ignore_errors=ignore_errors,
+            )
+            _run_rsync_command(clean_command, dry_run=dry_run, operation_label="clean")
+
             if not dry_run:
-                destination.mkdir(exist_ok=True, parents=True)
-                try:
-                    subprocess.run(shlex.split(command), check=True)
-                except subprocess.CalledProcessError as exc:
-                    raise typer.Abort(f"rclone move failed (exit code {exc.returncode}). Move aborted.")
+                deleted_count = _delete_source_files_matching_destination(source, destination)
+                if deleted_count:
+                    logging.info("Deleted %s matching source file(s)", deleted_count)
+                _remove_empty_source_directories(source)
 
                 if format_card and (psutil.disk_usage(card).used < 1 * 1024**3):
                     if platform.system() == "Windows":
@@ -187,7 +462,7 @@ def import_cards(config, card_path, copy, move, find, file_extension, dry_run: b
 
                 make_yml(importyml, config, dry_run, importdetails.get('card_number', 0), overwrite=True)
 
-        if not dry_run and (copy or move):
+        if not dry_run and (copy or clean):
             persisted = dict(importdetails)
             persisted.update({
                 "card_number": importdetails.get("card_number"),
@@ -196,7 +471,37 @@ def import_cards(config, card_path, copy, move, find, file_extension, dry_run: b
                 "import_date": importdetails.get("import_date"),
                 "destination_path": importdetails.get("destination_path", destination_path),
             })
-            importyml.write_text(yaml.safe_dump(persisted), encoding="utf-8")
+            #importyml.write_text(yaml.safe_dump(persisted), encoding="utf-8")
+
+            # Write to imports.csv in the same directory as import.yml
+            csv_dir = config.catalog_dir 
+            csv_path = csv_dir / "imports.csv"
+            import_token = importdetails.get("import_token")
+            # Use ISO 8601 format for date_time
+            date_time = datetime.now().isoformat()
+            # Directory relative to config file
+            config_dir = Path(config.data.get('card_store', '.')).resolve()
+            try:
+                rel_dir = str(csv_dir.relative_to(config_dir))
+            except Exception:
+                rel_dir = str(csv_dir)
+            row = {"import_token": import_token, "date_time": date_time, "directory": rel_dir}
+            # Append or create CSV
+            try:
+                if csv_path.exists():
+                    df = pd.read_csv(csv_path)
+                    df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+                else:
+                    df = pd.DataFrame([row])
+                df.to_csv(csv_path, index=False)
+            except Exception as e:
+                logging.warning(f"Failed to write import log to {csv_path}: {e}")
+
+            try:
+                file_times_path = destination / "file_times.txt.zst"
+                _write_file_times_manifest(destination, file_times_path)
+            except Exception as e:
+                logging.warning(f"Failed to write file times manifest to {destination}: {e}")
 
     if check:
         typer.echo(f"\nChecked {check_checked} card(s).")

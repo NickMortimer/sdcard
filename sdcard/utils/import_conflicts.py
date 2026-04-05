@@ -33,7 +33,7 @@ def _is_comparison_ignored(rel_path: str) -> bool:
         return True
     if normalized.lower().endswith('.trashinfo'):
         return True
-    if basename in {"import.yml", "readme.md"}:
+    if basename in {"readme.md"}:
         return True
     return False
 
@@ -146,12 +146,10 @@ def _prompt_for_new_token_if_destination_changed(
     source: Path,
     destination: Path,
     importdetails: dict,
-    rclone_path: Path | str,
     allow_overwrite: bool = False,
     prompt_overwrite: bool = True,
 ) -> bool:
     """Abort import and report differences when an existing destination has changed files."""
-    _ = rclone_path
     try:
         conflict_data = _collect_destination_conflicts(source, destination)
     except Exception as exc:

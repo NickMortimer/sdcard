@@ -132,6 +132,15 @@
             "console": "integratedTerminal",
             "justMyCode": true,
             "args":["import","/media/mor582/PG10300275","--config-path","/home/mor582/raid/IN2026-02/CSIRO/BMR4-80/import.yml"]
+        },
+                        {
+            "name": "sdcard mount",
+            "type": "python",
+            "request": "launch",
+            "program": "/home/mor582/code/sdcard/sdcard/main.py",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args":["mount-cards","--all"]
         }
     ]
 }

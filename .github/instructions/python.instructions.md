@@ -23,6 +23,20 @@ applyTo: '**/*.py'
 - Use consistent naming conventions and follow language-specific best practices.
 - Write concise, efficient, and idiomatic code that is also easily understandable.
 
+## Import Transfer Safety (Rclone)
+
+- Follow official rclone behavior for `copy` and `move` commands: https://rclone.org/docs/
+- Treat `copy` as non-destructive: source files remain after successful transfer.
+- Treat `move` as destructive: source files are removed only after successful transfer.
+- Use file modification time and size as the default criteria to decide whether files are the same.
+- Do not use MD5/checksum matching for routine import conflict detection unless explicitly requested.
+- Keep `--update` enabled for import transfers so destination-newer files are not overwritten.
+- Only use `--check-first` when explicitly requested, since it can increase memory usage.
+- Do not change existing overwrite and transfer-safety semantics unless explicitly requested.
+- Re-imports of the same card should be idempotent and quiet when content is unchanged.
+- Surface conflicts only for true overwrite risk: incoming content differs from an existing completed destination file.
+- Allow overwriting partial/incomplete destination files left by failed transfers so retries can complete cleanly.
+
 ## Code Style and Formatting
 
 - Follow the **PEP 8** style guide for Python.

@@ -48,9 +48,25 @@ sdcard register --all --card-details
 # Import cards (auto-discovers if none specified)
 sdcard import
 
+# Extract EXIF metadata into exif.json.zst files per image directory
+sdcard xif /path/to/head-directory
+
+# Control exiftool batch size per call
+sdcard xif /path/to/head-directory --batch-size 100
+
+# Control threadpool workers for per-directory extraction
+sdcard xif /path/to/head-directory --workers 8
+
 # Run concurrent imports on Linux
 sdcard turbo
 ```
+
+The `xif` command walks the directory tree below the path you give it. For each
+directory containing supported image files, it writes an `exif.json.zst` file in
+that directory. If that JSON file already exists, the directory is skipped.
+It uses `exiftool`, so ensure `exiftool` is installed and available in `PATH`.
+Use `--batch-size` to tune how many images are sent per `exiftool` call.
+Use `--workers` to control the threadpool size across directories.
 
 During import, each destination folder also gets a `README.md` summarizing the project and custodian metadata from the card's `import.yml`.
 
@@ -117,7 +133,7 @@ instrument : gopro_bruv
 card_number : 44
 import_date: <- set by  first import
 import_token : <-set by registration
-import_template : "{{card_store}}/{instrument}/{import_date}/{card_number}_{import_token}
+import_template : "{{card_store}}/{instrument}/{import_date}/{card_number}_{import_token}"
 ```
 ## Development
 
@@ -130,3 +146,39 @@ pip install -e .
 ## License
 
 MIT
+
+## SSH Operation and Permissions
+
+If you want to use `sdcard` to mount and eject SD cards over SSH without sudo, you must allow your user to run `udisksctl` actions via polkit. Add the following rule (as root) to `/etc/polkit-1/rules.d/49-udisks2-mount-eject.rules`:
+
+```javascript
+polkit.addRule(function(action, subject) {
+    if (
+        (action.id == "org.freedesktop.udisks2.filesystem-mount" ||
+         action.id == "org.freedesktop.udisks2.filesystem-unmount-others" ||
+         action.id == "org.freedesktop.udisks2.eject-media" ||
+         action.id == "org.freedesktop.udisks2.power-off-drive") &&
+        subject.isInGroup("plugdev")
+    ) {
+        return polkit.Result.YES;
+    }
+});
+```
+
+- Make sure your user is in the `plugdev` group (or change the group as needed).
+- Restart polkit or reboot for the rule to take effect.
+- This allows mounting, unmounting, ejecting, and powering off drives without sudo for users in the specified group—even over SSH.
+
+To add your user to the `plugdev` group (required for the rule above), run:
+
+```bash
+sudo usermod -aG plugdev $USER
+```
+
+Then log out and log back in (or restart your SSH session) for the group change to take effect.
+
+If your system does not already have a `plugdev` group, create it first:
+
+```bash
+sudo groupadd plugdev
+```

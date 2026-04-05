@@ -2,6 +2,7 @@ from datetime import datetime
 from pathlib import Path
 import logging
 import uuid
+from typing import Any
 import typer
 import yaml
 import psutil
@@ -139,7 +140,98 @@ def _get_pass_through_config_values(config) -> dict:
     return raw_config if isinstance(raw_config, dict) else {}
 
 
-def make_yml(file_path, config, dry_run, card_number=0, overwrite=False, prompt_card_details=False):
+def _extract_instrument_options(raw_instrument: Any) -> list[tuple[str, str]]:
+    """Build selectable instrument options from config values."""
+    if isinstance(raw_instrument, dict):
+        return [
+            (str(key).strip(), str(value).strip() or str(key).strip())
+            for key, value in raw_instrument.items()
+            if str(key).strip()
+        ]
+
+    if isinstance(raw_instrument, (list, tuple, set)):
+        return [
+            (str(item).strip(), str(item).strip())
+            for item in raw_instrument
+            if str(item).strip()
+        ]
+
+    if isinstance(raw_instrument, str) and raw_instrument.strip():
+        value = raw_instrument.strip()
+        return [(value, value)]
+
+    return []
+
+
+def _match_instrument_value(value: str, options: list[tuple[str, str]]) -> str | None:
+    """Return canonical instrument key if value matches key or label."""
+    requested = value.strip().lower()
+    for key, label in options:
+        if requested in {key.lower(), label.lower()}:
+            return key
+    return None
+
+
+def _prompt_for_instrument(options: list[tuple[str, str]], mount_path: Path) -> str:
+    """Prompt operator to select one instrument from configured options."""
+    typer.echo(f"Select instrument for {mount_path}:")
+    for index, (key, label) in enumerate(options, start=1):
+        typer.echo(f"  {index}. {key} ({label})")
+
+    while True:
+        selection = typer.prompt(
+            "Instrument number",
+            type=int,
+        )
+        if 1 <= selection <= len(options):
+            return options[selection - 1][0]
+        typer.echo(f"Please enter a value between 1 and {len(options)}")
+
+
+def _resolve_instrument(
+    cli_instrument: str | None,
+    existing_instrument: Any,
+    options: list[tuple[str, str]],
+    mount_path: Path,
+) -> str | None:
+    """Resolve instrument from CLI, existing metadata, or operator prompt."""
+    if cli_instrument:
+        if not options:
+            return cli_instrument.strip()
+
+        matched = _match_instrument_value(cli_instrument, options)
+        if matched is not None:
+            return matched
+
+        valid = ", ".join([key for key, _ in options])
+        raise typer.BadParameter(f"Invalid instrument '{cli_instrument}'. Choose one of: {valid}")
+
+    if isinstance(existing_instrument, str) and existing_instrument.strip():
+        existing_value = existing_instrument.strip()
+        if not options:
+            return existing_value
+        matched = _match_instrument_value(existing_value, options)
+        if matched is not None:
+            return matched
+
+    if len(options) == 1:
+        return options[0][0]
+
+    if len(options) > 1:
+        return _prompt_for_instrument(options, mount_path)
+
+    return None
+
+
+def make_yml(
+    file_path,
+    config,
+    dry_run,
+    card_number=0,
+    overwrite=False,
+    prompt_card_details=False,
+    instrument: str | None = None,
+):
     """Create or refresh an import.yml for a card."""
     existing = {}
     if file_path.exists():
@@ -211,6 +303,17 @@ def make_yml(file_path, config, dry_run, card_number=0, overwrite=False, prompt_
     }
 
     pass_through_config = _get_pass_through_config_values(config)
+    raw_instrument_value = pass_through_config.get("instrument", config.data.get("instrument"))
+    instrument_options = _extract_instrument_options(raw_instrument_value)
+    selected_instrument = _resolve_instrument(
+        cli_instrument=instrument,
+        existing_instrument=existing.get("instrument"),
+        options=instrument_options,
+        mount_path=file_path.parent,
+    )
+    if selected_instrument is not None:
+        base_data["instrument"] = selected_instrument
+
     merged_data = {**pass_through_config, **existing, **base_data}
 
     render_context = {
@@ -257,7 +360,15 @@ def make_yml(file_path, config, dry_run, card_number=0, overwrite=False, prompt_
         _write_destination_readme(file_path.parent, final_data, config)
 
 
-def register_cards(config, card_path, card_number, overwrite, dry_run: bool, prompt_card_details: bool = False):
+def register_cards(
+    config,
+    card_path,
+    card_number,
+    overwrite,
+    dry_run: bool,
+    prompt_card_details: bool = False,
+    instrument: str | None = None,
+):
     """
     Register SD cards by creating an import.yml on each card
     """
@@ -266,6 +377,22 @@ def register_cards(config, card_path, card_number, overwrite, dry_run: bool, pro
 
     if isinstance(card_path, list):
         for path, cardno in zip(card_path, card_number):
-            make_yml(Path(path) / "import.yml", config, dry_run, cardno, overwrite, prompt_card_details)
+            make_yml(
+                Path(path) / "import.yml",
+                config,
+                dry_run,
+                cardno,
+                overwrite,
+                prompt_card_details,
+                instrument,
+            )
     else:
-        make_yml(Path(card_path) / "import.yml", config, dry_run, card_number, overwrite, prompt_card_details)
+        make_yml(
+            Path(card_path) / "import.yml",
+            config,
+            dry_run,
+            card_number,
+            overwrite,
+            prompt_card_details,
+            instrument,
+        )
