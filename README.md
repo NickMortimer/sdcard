@@ -45,11 +45,30 @@ sdcard register --all
 # Register cards and prompt for optional manufacturer/UHS metadata
 sdcard register --all --card-details
 
+# Refresh an existing import.yml using config defaults while keeping the
+# chosen instrument and card number, and generating a new token.
+sdcard register /path/to/card --config-path /path/to/import.yml --refresh
+
 # Import cards (auto-discovers if none specified)
 sdcard import
 
 # Extract EXIF metadata into exif.json.zst files per image directory
 sdcard xif /path/to/head-directory
+
+# Restrict EXIF extraction to a specific file extension
+sdcard xif /path/to/head-directory --ext ARW
+
+# Create thumbnail files in a sibling thumbnails/ directory
+sdcard thumbnail /path/to/head-directory
+
+# Restrict thumbnail generation to a specific file extension
+sdcard thumbnail /path/to/head-directory --ext ARW
+
+# Mirror the source tree into a separate output root
+sdcard thumbnail /path/to/head-directory --output-dir-name /path/to/thumb-root
+
+# Also copy extracted metadata into generated thumbnail files
+sdcard thumbnail /path/to/head-directory --copy-meta
 
 # Control exiftool batch size per call
 sdcard xif /path/to/head-directory --batch-size 100
@@ -61,12 +80,28 @@ sdcard xif /path/to/head-directory --workers 8
 sdcard turbo
 ```
 
+When registration writes an `import.yml`, it preserves the destination template string from the supplied config, prompts for any top-level config value that offers multiple choices, and then prints the instrument plus destination written for each card.
+
+`sdcard register --refresh` rebuilds the card's `import.yml` from the supplied config, keeps the existing card number and selected instrument, generates a new `import_token`, and applies current config defaults for the remaining fields.
+
 The `xif` command walks the directory tree below the path you give it. For each
 directory containing supported image files, it writes an `exif.json.zst` file in
 that directory. If that JSON file already exists, the directory is skipped.
 It uses `exiftool`, so ensure `exiftool` is installed and available in `PATH`.
 Use `--batch-size` to tune how many images are sent per `exiftool` call.
 Use `--workers` to control the threadpool size across directories.
+Use `--ext` one or more times to limit processing to specific suffixes such as
+`ARW` or `CR3`.
+
+The `thumbnail` command is a second-stage workflow. It walks the same directory
+tree, reads the previously generated `exif.json.zst` files, and creates thumbnail
+files in a sibling `thumbnails/` directory without re-reading EXIF metadata from
+the source files. Use `--output-dir-name` with a simple name to change that
+sibling directory name, or pass a path such as `/path/to/thumb-root` to mirror
+the source directory structure under a separate thumbnail root.
+When `--copy-meta` is enabled, it writes extracted metadata into the generated
+thumbnail files by importing the extracted JSON through `exiftool`.
+Use `--ext` to match the same suffix filter you used during `xif` extraction.
 
 During import, each destination folder also gets a `README.md` summarizing the project and custodian metadata from the card's `import.yml`.
 
@@ -93,7 +128,7 @@ Configuration is read from `config.yml` in the current directory. Defaults:
 - `card_store`: `./card_store`
 - `import_path_template`: `{{card_store}}/{import_date}/{import_token}`
 
-When you pass a config file to `sdcard register --config-path ...`, all top-level key/value pairs from that config file are copied into each card's `import.yml` (card-specific fields like `card_number`, `import_token`, `destination_path`, `card_size_gb`, and `card_format` still take precedence).
+When you pass a config file to `sdcard register --config-path ...`, all top-level key/value pairs from that config file are copied into each card's `import.yml`. If a top-level value is a list or mapping of choices, registration prompts you to select one value for that card. Card-specific fields like `card_number`, `import_token`, `destination_path`, `card_size_gb`, and `card_format` still take precedence.
 
 ### Card import.yml (on each card)
 

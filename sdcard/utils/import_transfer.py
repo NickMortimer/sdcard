@@ -278,7 +278,7 @@ def _delete_source_files_matching_destination(
     return deleted_count
 
 
-def import_cards(config, card_path, copy, clean, find, file_extension, dry_run: bool, format_card=False, allow_overwrite: bool = False, check: bool = False, update: bool = False, precheck: bool = False, ignore_errors: bool = False):
+def import_cards(config, card_path, copy, clean, find, file_extension, dry_run: bool, format_card=False, allow_overwrite: bool = False, check: bool = False, update: bool = False, precheck: bool = False, ignore_errors: bool = False, refresh: bool = False):
     """Copy or move (clean) SD card contents to the configured card store."""
     import pandas as pd
     _ = file_extension
@@ -460,7 +460,15 @@ def import_cards(config, card_path, copy, clean, find, file_extension, dry_run: 
                         process = subprocess.Popen(shlex.split(command))
                         process.wait()
 
-                make_yml(importyml, config, dry_run, importdetails.get('card_number', 0), overwrite=True)
+                if refresh:
+                    make_yml(
+                        importyml,
+                        config,
+                        dry_run,
+                        importdetails.get('card_number', 0),
+                        overwrite=True,
+                        refresh=True,
+                    )
 
         if not dry_run and (copy or clean):
             persisted = dict(importdetails)

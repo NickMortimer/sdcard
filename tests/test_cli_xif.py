@@ -195,3 +195,45 @@ def test_xif_retries_with_smaller_split_batches(tmp_path, monkeypatch) -> None:
     assert result.exit_code == 0
     assert batch_sizes[0] == 4
     assert 2 in batch_sizes
+
+
+def test_xif_discovers_raw_file_extensions(tmp_path, monkeypatch) -> None:
+    raw_path = tmp_path / "photo.nef"
+    _make_fake_image(raw_path)
+
+    def fake_run(command, check, capture_output, text):
+        payload = [{"SourceFile": command[2], "Model": "RawCam"}]
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr(cli_xif.shutil, "which", lambda _: "/usr/bin/exiftool")
+    monkeypatch.setattr(cli_xif.subprocess, "run", fake_run)
+
+    result = runner.invoke(sdcard, ["xif", str(tmp_path)])
+
+    assert result.exit_code == 0
+    output = _decompress_json_zstd(tmp_path / "exif.json.zst")
+    assert output["photo.nef"]["Model"] == "RawCam"
+
+
+def test_xif_filters_by_requested_extension(tmp_path, monkeypatch) -> None:
+    arw_path = tmp_path / "a.arw"
+    nef_path = tmp_path / "b.nef"
+    _make_fake_image(arw_path)
+    _make_fake_image(nef_path)
+
+    def fake_run(command, check, capture_output, text):
+        payload = [
+            {"SourceFile": image_path, "Model": "FilteredCam"}
+            for image_path in command[2:]
+        ]
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps(payload), stderr="")
+
+    monkeypatch.setattr(cli_xif.shutil, "which", lambda _: "/usr/bin/exiftool")
+    monkeypatch.setattr(cli_xif.subprocess, "run", fake_run)
+
+    result = runner.invoke(sdcard, ["xif", str(tmp_path), "--ext", "ARW"])
+
+    assert result.exit_code == 0
+    output = _decompress_json_zstd(tmp_path / "exif.json.zst")
+    assert "a.arw" in output
+    assert "b.nef" not in output

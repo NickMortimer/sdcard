@@ -22,7 +22,40 @@ IMAGE_SUFFIXES = {
     ".heic",
     ".heif",
     ".webp",
+    ".3fr",
+    ".arw",
+    ".cr2",
+    ".cr3",
+    ".dng",
+    ".erf",
+    ".kdc",
+    ".mos",
+    ".nef",
+    ".nrw",
+    ".orf",
+    ".pef",
+    ".raf",
+    ".raw",
+    ".rw2",
+    ".srw",
+    ".x3f",
 }
+
+
+def _normalize_extensions(extensions: list[str] | None) -> set[str]:
+    """Normalize optional extension filters into lowercase dotted suffixes."""
+    if not extensions:
+        return set(IMAGE_SUFFIXES)
+
+    normalized: set[str] = set()
+    for extension in extensions:
+        text = extension.strip().lower()
+        if not text:
+            raise typer.BadParameter("Extension filters must not be empty")
+        if not text.startswith("."):
+            text = f".{text}"
+        normalized.add(text)
+    return normalized
 
 
 def _compress_json_zstd(payload: dict[str, dict[str, object]]) -> bytes:
@@ -76,12 +109,16 @@ def _chunk_paths(items: list[Path], batch_size: int) -> list[list[Path]]:
     return [items[index:index + batch_size] for index in range(0, len(items), batch_size)]
 
 
-def _directory_images(directory: Path) -> list[Path]:
+def _directory_images(
+    directory: Path,
+    allowed_suffixes: set[str] | None = None,
+) -> list[Path]:
     """Return supported image files in a directory."""
+    suffixes = IMAGE_SUFFIXES if allowed_suffixes is None else allowed_suffixes
     return sorted(
         path
         for path in directory.iterdir()
-        if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES
+        if path.is_file() and path.suffix.lower() in suffixes
     )
 
 
@@ -237,6 +274,7 @@ def extract_exif_tree(
     output_name: str,
     batch_size: int,
     workers: int,
+    allowed_suffixes: set[str],
 ) -> dict[str, int]:
     """Walk a directory tree and write one EXIF JSON file per image directory."""
     written = 0
@@ -259,7 +297,7 @@ def extract_exif_tree(
             skipped += 1
             continue
 
-        image_files = _directory_images(directory)
+        image_files = _directory_images(directory, allowed_suffixes)
         if not image_files:
             empty += 1
             continue
@@ -404,6 +442,11 @@ def xif(
         min=1,
         help="Number of worker threads for directory processing",
     ),
+    extensions: list[str] = typer.Option(
+        None,
+        "--ext",
+        help="Only process files with these extensions; repeat for multiple",
+    ),
 ) -> None:
     """Extract EXIF metadata into a JSON file in each image directory."""
     if shutil.which("exiftool") is None:
@@ -414,7 +457,14 @@ def xif(
     if not head_directory.is_dir():
         raise typer.BadParameter(f"Path is not a directory: {head_directory}")
 
-    summary = extract_exif_tree(head_directory, output_name, batch_size, workers)
+    allowed_suffixes = _normalize_extensions(extensions)
+    summary = extract_exif_tree(
+        head_directory,
+        output_name,
+        batch_size,
+        workers,
+        allowed_suffixes,
+    )
     typer.echo(
         "📷 EXIF extraction complete: "
         f"wrote {summary['written']}, skipped {summary['skipped']}, "

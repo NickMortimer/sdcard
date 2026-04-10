@@ -10,6 +10,22 @@ from rich.text import Text
 from pathlib import Path
 from sdcard.config import Config
 from sdcard.utils.cards_discovery import list_sdcards
+from sdcard.utils.cli_defaults import (
+    DEFAULT_ALLOW_OVERWRITE,
+    DEFAULT_CARD_SIZE,
+    DEFAULT_CHECK,
+    DEFAULT_CLEAN,
+    DEFAULT_COPY,
+    DEFAULT_DRY_RUN,
+    DEFAULT_FILE_EXTENSION,
+    DEFAULT_FIND,
+    DEFAULT_FORMAT_CARD,
+    DEFAULT_FORMAT_TYPE,
+    DEFAULT_IGNORE_ERRORS,
+    DEFAULT_PRECHECK,
+    DEFAULT_REFRESH,
+    DEFAULT_UPDATE,
+)
 from sdcard.utils.import_transfer import import_cards
 
 
@@ -62,6 +78,7 @@ def _run_import_with_live_table(
     config_path: Path | None,
     copy: bool,
     clean: bool,
+    refresh: bool,
     find: bool,
     allow_overwrite: bool,
     check: bool,
@@ -79,10 +96,12 @@ def _run_import_with_live_table(
         command.extend(["--config-path", str(config_path)])
     if clean:
         command.append("--clean")
-    if not copy:
-        command.extend(["--copy", "False"])
-    if not find:
-        command.extend(["--find", "False"])
+    if refresh:
+        command.append("--refresh")
+    if copy != DEFAULT_COPY:
+        command.extend(["--copy", str(copy)])
+    if find != DEFAULT_FIND:
+        command.extend(["--find", str(find)])
     if allow_overwrite:
         command.append("--allow-overwrite")
     if check:
@@ -91,13 +110,13 @@ def _run_import_with_live_table(
         command.append("--update")
     if precheck:
         command.append("--precheck")
-    if card_size != 512:
+    if card_size != DEFAULT_CARD_SIZE:
         command.extend(["--card-size", str(card_size)])
-    if format_type != "exfat":
+    if format_type != DEFAULT_FORMAT_TYPE:
         command.extend(["--format-type", format_type])
     if dry_run:
         command.append("--dry-run")
-    if file_extension != "MP4":
+    if file_extension != DEFAULT_FILE_EXTENSION:
         command.extend(["--file-extension", file_extension])
     if format_card:
         command.append("--format-card")
@@ -172,19 +191,20 @@ def _run_import_with_live_table(
 def import_command(
     card_path: list[str] = typer.Argument(None, help="One or more SD card mount points"),
     config_path: Path = typer.Option(None, help="Path to config file"),
-    copy: bool = typer.Option(True, help="Copy source (default)", show_default=True),
-    clean: bool = typer.Option(False, help="Move source and delete after copy"),
-    find: bool = typer.Option(True, help="Reuse an existing destination that matches the import token"),
-    allow_overwrite: bool = typer.Option(False, "--allow-overwrite", help="Allow overwriting changed files at destination (unsafe)"),
-    check: bool = typer.Option(False, "--check", help="Check all cards for conflicts only; do not copy or move"),
-    update: bool = typer.Option(False, "--update", help="Allow newer source files to update older destination files"),
-    precheck: bool = typer.Option(False, "--precheck", help="Run destination conflict prechecks before copy/move"),
-    card_size: int = typer.Option(512, help="Maximum card size to auto-detect"),
-    format_type: str = typer.Option('exfat', help="Card format type"),
-    dry_run: bool = typer.Option(False, help="Show actions without changing files"),
-    file_extension: str = typer.Option("MP4", help="extension to catalog"),
-    format_card: bool = typer.Option(False, help="Format drive after import and move"),
-    ignore_errors: bool = typer.Option(False, "--ignore-errors", help="Pass --ignore-errors to rsync and continue on file errors"),
+    copy: bool = typer.Option(DEFAULT_COPY, help="Copy source (default)", show_default=True),
+    clean: bool = typer.Option(DEFAULT_CLEAN, help="Move source and delete after copy"),
+    refresh: bool = typer.Option(DEFAULT_REFRESH, "--refresh", help="After --clean, write a new import.yml to the card"),
+    find: bool = typer.Option(DEFAULT_FIND, help="Reuse an existing destination that matches the import token"),
+    allow_overwrite: bool = typer.Option(DEFAULT_ALLOW_OVERWRITE, "--allow-overwrite", help="Allow overwriting changed files at destination (unsafe)"),
+    check: bool = typer.Option(DEFAULT_CHECK, "--check", help="Check all cards for conflicts only; do not copy or move"),
+    update: bool = typer.Option(DEFAULT_UPDATE, "--update", help="Allow newer source files to update older destination files"),
+    precheck: bool = typer.Option(DEFAULT_PRECHECK, "--precheck", help="Run destination conflict prechecks before copy/move"),
+    card_size: int = typer.Option(DEFAULT_CARD_SIZE, help="Maximum card size to auto-detect"),
+    format_type: str = typer.Option(DEFAULT_FORMAT_TYPE, help="Card format type"),
+    dry_run: bool = typer.Option(DEFAULT_DRY_RUN, help="Show actions without changing files"),
+    file_extension: str = typer.Option(DEFAULT_FILE_EXTENSION, help="extension to catalog"),
+    format_card: bool = typer.Option(DEFAULT_FORMAT_CARD, help="Format drive after import and move"),
+    ignore_errors: bool = typer.Option(DEFAULT_IGNORE_ERRORS, "--ignore-errors", help="Pass --ignore-errors to rsync and continue on file errors"),
 ):
     config = Config(config_path)
     if not card_path:
@@ -198,6 +218,7 @@ def import_command(
             config_path=config_path,
             copy=copy,
             clean=clean,
+            refresh=refresh,
             find=find,
             allow_overwrite=allow_overwrite,
             check=check,
@@ -226,4 +247,5 @@ def import_command(
         file_extension=file_extension,
         format_card=format_card,
         ignore_errors=ignore_errors,
+        refresh=refresh,
     )

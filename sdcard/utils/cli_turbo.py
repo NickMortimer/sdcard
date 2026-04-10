@@ -7,11 +7,26 @@ import yaml
 import queue
 import threading
 import time
+import uuid
 from pathlib import Path
 from collections import defaultdict
 from typer.testing import CliRunner
 from sdcard.config import Config
 from sdcard.utils.cards_discovery import get_available_cards
+from sdcard.utils.cli_defaults import (
+    DEFAULT_CARD_SIZE,
+    DEFAULT_CHECK,
+    DEFAULT_CLEAN,
+    DEFAULT_DEBUG,
+    DEFAULT_FORMAT_TYPE,
+    DEFAULT_IGNORE_ERRORS,
+    DEFAULT_MAX_PROCESSES,
+    DEFAULT_MAX_SD_SPEED,
+    DEFAULT_PRECHECK,
+    DEFAULT_QUIET_WORKERS,
+    DEFAULT_REFRESH,
+    DEFAULT_UPDATE,
+)
 from sdcard.utils.usb import (
     get_complete_usb_card_info, scan_thunderbolt_ports, detect_thunderbolt_upstream_capacity,
     analyze_destination_capacity, calculate_real_transfer_rate, get_usb_hierarchy_info
@@ -105,6 +120,70 @@ def _card_has_remaining_payload_files(card_path: str) -> bool:
 
     return False
 
+
+def _write_new_import_yml_after_clean(card_path: str) -> None:
+    """Write a fresh import.yml to card after successful clean, preserving instrument name.
+    
+    Reads the existing import.yml to extract the instrument field,
+    then writes a new import.yml with card_number reset to 1 and import-related
+    fields cleared (import_date, import_token).
+    """
+    card_root = Path(card_path)
+    import_yml_path = card_root / "import.yml"
+    
+    if not import_yml_path.exists():
+        return
+    
+    try:
+        # Read existing import.yml to get instrument and card_number
+        with open(import_yml_path, 'r') as f:
+            existing = yaml.safe_load(f) or {}
+        
+        instrument = existing.get('instrument', 'unknown')
+        card_number = existing.get('card_number', 1)
+        
+        # Generate new import_token
+        import_token = str(uuid.uuid4())[:8].replace('-', '')
+        
+        # Always get destination_path from config file
+        from sdcard.config import Config
+        config_path = None
+        # Try to find config path from parent directory
+        for parent in card_root.parents:
+            candidate = parent / "import.yml"
+            if candidate.exists():
+                config_path = str(candidate)
+                break
+        config = Config(config_path) if config_path else Config()
+        destination_path = config.data.get('import_path_template') or config.data.get('destination_path')
+
+        # Build new import.yml preserving instrument and card_number, with fresh token
+        new_yml = {
+            'field_trip_id': existing.get('field_trip_id', ''),
+            'start_date': existing.get('start_date', ''),
+            'end_date': existing.get('end_date', ''),
+            'custodian': existing.get('custodian', ''),
+            'email': existing.get('email', ''),
+            'project_name': existing.get('project_name', ''),
+            'instrument': instrument,
+            'card_number': card_number,
+            'import_token': import_token,
+            'destination_path': destination_path,
+            # Clear import_date so it's set fresh on next import
+        }
+
+        # Only include non-empty fields
+        new_yml = {k: v for k, v in new_yml.items() if v}
+
+        # Write the new import.yml
+        with open(import_yml_path, 'w') as f:
+            yaml.dump(new_yml, f, default_flow_style=False, sort_keys=False)
+
+        print(f"✏️  Updated import.yml on {card_path} (instrument='{instrument}', card_number={card_number}, token='{import_token}', destination_path='{destination_path}')")
+    except Exception as e:
+        print(f"⚠️  Could not update import.yml on {card_path}: {e}")
+
+
 def _run_parallel_import_workers(
     worker_assignments: dict[str, list[str]],
     clean: bool,
@@ -113,6 +192,7 @@ def _run_parallel_import_workers(
     precheck: bool,
     ignore_errors: bool = False,
     update: bool = False,
+    refresh: bool = False,
 ) -> None:
     """Run import workers as child processes and show a live per-card status table."""
     processes: dict[str, subprocess.Popen] = {}
@@ -329,6 +409,10 @@ def _run_parallel_import_workers(
                         for card_path in worker_assignments.get(worker_name, []):
                             if _card_has_remaining_payload_files(card_path):
                                 left_over_cards.append(card_path)
+                            else:
+                                # Clean succeeded with no remaining files, write fresh import.yml if refresh is set
+                                if refresh:
+                                    _write_new_import_yml_after_clean(card_path)
 
                     if left_over_cards:
                         print(f"❌ {worker_name} finished with files left on {len(left_over_cards)} card(s)")
@@ -360,6 +444,10 @@ def _run_parallel_import_workers(
                             for card_path in worker_assignments.get(worker_name, []):
                                 if _card_has_remaining_payload_files(card_path):
                                     left_over_cards.add(card_path)
+                                else:
+                                    # Clean succeeded with no remaining files, write fresh import.yml if refresh is set
+                                    if refresh:
+                                        _write_new_import_yml_after_clean(card_path)
 
                         current_card = current_card_by_worker.get(worker_name)
                         if current_card and current_card in card_state:
@@ -413,17 +501,18 @@ def _run_parallel_import_workers(
 
 
 def turbo(config_path: str = typer.Option(None, help="Path to config directory."),
-         max_processes:int = typer.Option(4, help="Number of concurrent transfers"),
-         format_type:str = typer.Option('exfat', help="Card format type"),
-         card_size:int = typer.Option(512, help="maximum card size"),
-         clean:bool = typer.Option(False, help="move all the files to location"),
-         check: bool = typer.Option(False, "--check", help="Preflight each card and skip cards that have copy conflicts"),
-         update: bool = typer.Option(False, "--update", help="Allow newer source files to update older destination files"),
-         precheck: bool = typer.Option(False, "--precheck", help="Run destination conflict prechecks before copy/move"),
-         quiet_workers: bool = typer.Option(False, "--quiet-workers", help="Hide worker output and only show process status"),
-         ignore_errors: bool = typer.Option(False, "--ignore-errors", help="Pass --ignore-errors to rsync and continue on file errors"),
-         debug:bool = typer.Option(False, help="Card format type"),
-         max_sd_speed:float = typer.Option(140.0, help="Maximum realistic SD card read speed in MB/s"),
+         max_processes:int = typer.Option(DEFAULT_MAX_PROCESSES, help="Number of concurrent transfers"),
+         format_type:str = typer.Option(DEFAULT_FORMAT_TYPE, help="Card format type"),
+         card_size:int = typer.Option(DEFAULT_CARD_SIZE, help="maximum card size"),
+         clean:bool = typer.Option(DEFAULT_CLEAN, help="move all the files to location"),
+         refresh:bool = typer.Option(DEFAULT_REFRESH, "--refresh", help="After --clean, write a new import.yml to each card"),
+         check: bool = typer.Option(DEFAULT_CHECK, "--check", help="Preflight each card and skip cards that have copy conflicts"),
+         update: bool = typer.Option(DEFAULT_UPDATE, "--update", help="Allow newer source files to update older destination files"),
+         precheck: bool = typer.Option(DEFAULT_PRECHECK, "--precheck", help="Run destination conflict prechecks before copy/move"),
+         quiet_workers: bool = typer.Option(DEFAULT_QUIET_WORKERS, "--quiet-workers", help="Hide worker output and only show process status"),
+         ignore_errors: bool = typer.Option(DEFAULT_IGNORE_ERRORS, "--ignore-errors", help="Pass --ignore-errors to rsync and continue on file errors"),
+         debug:bool = typer.Option(DEFAULT_DEBUG, help="Card format type"),
+         max_sd_speed:float = typer.Option(DEFAULT_MAX_SD_SPEED, help="Maximum realistic SD card read speed in MB/s"),
          dest_write_speed:float = typer.Option(None, help="Override destination drive write speed in MB/s (auto-detect if not specified)")):
     """
     This command orchestrates the import process for ALL detected SD cards,
@@ -558,6 +647,7 @@ def turbo(config_path: str = typer.Option(None, help="Path to config directory."
             precheck=precheck,
             ignore_errors=ignore_errors,
             update=update,
+            refresh=refresh,
         )
     else:
         # Windows version - use existing get_available_cards function
@@ -625,6 +715,7 @@ def turbo(config_path: str = typer.Option(None, help="Path to config directory."
             precheck=precheck,
             ignore_errors=ignore_errors,
             update=update,
+            refresh=refresh,
         )
         
         print("✅ Import orchestration completed!")

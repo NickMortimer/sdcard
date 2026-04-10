@@ -16,6 +16,7 @@ from sdcard.utils.mount_tools import mount_cards, eject_cards_command
 from sdcard.utils.cli_basic import register_command, list_cards
 from sdcard.utils.cli_import import import_command
 from sdcard.utils.cli_probe import probe
+from sdcard.utils.cli_thumbnail import thumbnail
 from sdcard.utils.cli_turbo import turbo
 from sdcard.utils.cli_xif import xif
 
@@ -36,6 +37,7 @@ sdcard.command('import')(import_command)
 sdcard.command('probe')(probe)
 sdcard.command('turbo')(turbo)
 sdcard.command('xif')(xif)
+sdcard.command('thumbnail')(thumbnail)
 
 
 
