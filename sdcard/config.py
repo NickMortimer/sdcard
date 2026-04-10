@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Optional
 import jinja2
+import typer
 import yaml
 
 DEFAULT_CARD_STORE_NAME = "card_store"
@@ -9,14 +10,31 @@ DEFAULT_IMPORT_TEMPLATE = "{{card_store}}/{import_date}/{import_token}"
 
 class Config:
     def __init__(self, config_path: Optional[Path] = None):
-        self.config_path =  Path.cwd() / 'config.yml' if config_path is None else Path(config_path)
+        self.explicit_config_path = config_path is not None
+        self.config_path = Path.cwd() / 'config.yml' if config_path is None else Path(config_path)
         self.catalog_dir = self.config_path.parent
+        self.loaded_from_file = False
         self.data = self._load_config()
+
+    @property
+    def uses_implicit_defaults(self) -> bool:
+        return not self.explicit_config_path and not self.loaded_from_file
 
     def _load_config(self):
         if not self.config_path.exists():
+            if self.explicit_config_path:
+                raise typer.BadParameter(
+                    f"Config file not found: {self.config_path}",
+                    param_hint="--config-path",
+                )
             raw_data = {}
         else:
+            if self.config_path.is_dir():
+                raise typer.BadParameter(
+                    f"Config path must be a file: {self.config_path}",
+                    param_hint="--config-path",
+                )
+            self.loaded_from_file = True
             raw_data = yaml.safe_load(self.config_path.read_text(encoding='utf-8')) or {}
 
         # Ensure base paths exist even when no config file is present

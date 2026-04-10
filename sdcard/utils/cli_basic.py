@@ -53,6 +53,10 @@ def register_command(
     format_type: str = typer.Option(DEFAULT_FORMAT_TYPE, help="Card format type"),
 ):
     config = Config(config_path)
+    if config.uses_implicit_defaults:
+        typer.echo(
+            "⚠️  No config file provided; using default parameters for import.yml"
+        )
     if all and (not card_path ):
         card_path = list_sdcards(format_type, card_size)
         if card_number is None:
