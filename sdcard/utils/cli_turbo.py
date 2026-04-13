@@ -7,7 +7,6 @@ import yaml
 import queue
 import threading
 import time
-import uuid
 from pathlib import Path
 from collections import defaultdict
 from typer.testing import CliRunner
@@ -119,69 +118,6 @@ def _card_has_remaining_payload_files(card_path: str) -> bool:
             return True
 
     return False
-
-
-def _write_new_import_yml_after_clean(card_path: str) -> None:
-    """Write a fresh import.yml to card after successful clean, preserving instrument name.
-    
-    Reads the existing import.yml to extract the instrument field,
-    then writes a new import.yml with card_number reset to 1 and import-related
-    fields cleared (import_date, import_token).
-    """
-    card_root = Path(card_path)
-    import_yml_path = card_root / "import.yml"
-    
-    if not import_yml_path.exists():
-        return
-    
-    try:
-        # Read existing import.yml to get instrument and card_number
-        with open(import_yml_path, 'r') as f:
-            existing = yaml.safe_load(f) or {}
-        
-        instrument = existing.get('instrument', 'unknown')
-        card_number = existing.get('card_number', 1)
-        
-        # Generate new import_token
-        import_token = str(uuid.uuid4())[:8].replace('-', '')
-        
-        # Always get destination_path from config file
-        from sdcard.config import Config
-        config_path = None
-        # Try to find config path from parent directory
-        for parent in card_root.parents:
-            candidate = parent / "import.yml"
-            if candidate.exists():
-                config_path = str(candidate)
-                break
-        config = Config(config_path) if config_path else Config()
-        destination_path = config.data.get('import_path_template') or config.data.get('destination_path')
-
-        # Build new import.yml preserving instrument and card_number, with fresh token
-        new_yml = {
-            'field_trip_id': existing.get('field_trip_id', ''),
-            'start_date': existing.get('start_date', ''),
-            'end_date': existing.get('end_date', ''),
-            'custodian': existing.get('custodian', ''),
-            'email': existing.get('email', ''),
-            'project_name': existing.get('project_name', ''),
-            'instrument': instrument,
-            'card_number': card_number,
-            'import_token': import_token,
-            'destination_path': destination_path,
-            # Clear import_date so it's set fresh on next import
-        }
-
-        # Only include non-empty fields
-        new_yml = {k: v for k, v in new_yml.items() if v}
-
-        # Write the new import.yml
-        with open(import_yml_path, 'w') as f:
-            yaml.dump(new_yml, f, default_flow_style=False, sort_keys=False)
-
-        print(f"✏️  Updated import.yml on {card_path} (instrument='{instrument}', card_number={card_number}, token='{import_token}', destination_path='{destination_path}')")
-    except Exception as e:
-        print(f"⚠️  Could not update import.yml on {card_path}: {e}")
 
 
 def _run_parallel_import_workers(
@@ -345,6 +281,8 @@ def _run_parallel_import_workers(
         command = [sys.executable, "-m", "sdcard.main", "import", *cards]
         if clean:
             command.append("--clean")
+        if refresh:
+            command.append("--refresh")
         if precheck:
             command.append("--precheck")
         if update:
@@ -409,10 +347,6 @@ def _run_parallel_import_workers(
                         for card_path in worker_assignments.get(worker_name, []):
                             if _card_has_remaining_payload_files(card_path):
                                 left_over_cards.append(card_path)
-                            else:
-                                # Clean succeeded with no remaining files, write fresh import.yml if refresh is set
-                                if refresh:
-                                    _write_new_import_yml_after_clean(card_path)
 
                     if left_over_cards:
                         print(f"❌ {worker_name} finished with files left on {len(left_over_cards)} card(s)")
@@ -444,10 +378,6 @@ def _run_parallel_import_workers(
                             for card_path in worker_assignments.get(worker_name, []):
                                 if _card_has_remaining_payload_files(card_path):
                                     left_over_cards.add(card_path)
-                                else:
-                                    # Clean succeeded with no remaining files, write fresh import.yml if refresh is set
-                                    if refresh:
-                                        _write_new_import_yml_after_clean(card_path)
 
                         current_card = current_card_by_worker.get(worker_name)
                         if current_card and current_card in card_state:

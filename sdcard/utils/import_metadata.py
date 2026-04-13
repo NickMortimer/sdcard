@@ -222,6 +222,31 @@ def _prompt_for_choice(field_name: str, options: list[tuple[str, str]], mount_pa
             return options[selection - 1][0]
         typer.echo(f"Please enter a value between 1 and {len(options)}")
 
+def _extract_platform_instrument_options(raw_platforms: Any) -> list[tuple[str, str, str, str]]:
+    """Return flattened options as (key, label, platform, instrument)."""
+    if not isinstance(raw_platforms, dict):
+        return []
+
+    options: list[tuple[str, str, str, str]] = []
+    for platform_key, platform_data in raw_platforms.items():
+        platform = str(platform_key).strip()
+        if not platform:
+            continue
+
+        instruments = platform_data.get("instruments", {}) if isinstance(platform_data, dict) else {}
+        if not isinstance(instruments, dict):
+            continue
+
+        for instrument_key, instrument_label in instruments.items():
+            instrument = str(instrument_key).strip()
+            if not instrument:
+                continue
+            key = f"{platform}_{instrument}"
+            label = str(instrument_label).strip() or instrument
+            options.append((key, label, platform, instrument))
+
+    return options
+
 
 def _resolve_config_choice_value(
     field_name: str,
@@ -315,6 +340,27 @@ def _get_destination_value_to_write(config, pass_through_config: dict) -> str:
         or config.data.get('destination_path')
         or DEFAULT_IMPORT_TEMPLATE
     )
+
+
+def refresh_import_yml_after_clean(
+    file_path: Path,
+    existing_data_pre_clean: dict[str, Any],
+    dry_run: bool,
+) -> dict[str, Any]:
+    """Refresh import.yml fields after a successful clean operation.
+
+    Only updates import_token and register_date, and clears import_date.
+    All other values are preserved from the pre-clean import.yml snapshot.
+    """
+    refreshed = dict(existing_data_pre_clean or {})
+    refreshed["import_token"] = str(uuid.uuid4())[0:8]
+    refreshed["register_date"] = f"{datetime.now():%Y-%m-%d}"
+    refreshed.pop("import_date", None)
+
+    if not dry_run:
+        file_path.write_text(yaml.safe_dump(refreshed, sort_keys=False), encoding="utf-8")
+
+    return refreshed
 
 
 def make_yml(
@@ -411,20 +457,65 @@ def make_yml(
         pass_through_config,
         existing,
         file_path.parent,
-        skip_keys={"instrument"},
+        skip_keys={"instrument", "platforms"},
     )
-    raw_instrument_value = pass_through_config.get("instrument", config.data.get("instrument"))
-    instrument_options = _extract_choice_options(raw_instrument_value)
-    selected_instrument = _resolve_instrument(
-        cli_instrument=instrument,
-        existing_instrument=existing.get("instrument"),
-        options=instrument_options,
-        mount_path=file_path.parent,
-    )
-    if selected_instrument is not None:
-        base_data["instrument"] = selected_instrument
-        if len(instrument_options) > 1:
-            prompted_choices["instrument"] = selected_instrument
+    platforms_dict = pass_through_config.get("platforms") or config.data.get("platforms")
+    if isinstance(platforms_dict, dict) and platforms_dict:
+        option_rows = _extract_platform_instrument_options(platforms_dict)
+
+        if not option_rows:
+            typer.echo("No instruments defined under 'platforms'. Instrument will be set to '-'.")
+            base_data["instrument"] = "-"
+        else:
+            options = [(key, label) for key, label, _platform, _instrument in option_rows]
+            if instrument:
+                matched_key = _match_choice_value(instrument, options)
+                if matched_key is None:
+                    valid = ", ".join([key for key, _ in options])
+                    raise typer.BadParameter(
+                        f"Invalid instrument '{instrument}'. Choose one of: {valid}"
+                    )
+                selected_key = matched_key
+            elif isinstance(existing.get("instrument"), str) and existing.get("instrument", "").strip():
+                existing_instrument = existing.get("instrument", "").strip()
+                matched_key = _match_choice_value(existing_instrument, options)
+                selected_key = matched_key if matched_key else None
+            elif len(options) == 1:
+                selected_key = options[0][0]
+            else:
+                selected_key = _prompt_for_choice("instrument", options, file_path.parent)
+
+            if selected_key is not None:
+                selected_row = next(
+                    row for row in option_rows if row[0].lower() == selected_key.lower()
+                )
+                base_data["instrument"] = selected_row[0]
+                base_data["platform"] = selected_row[2]
+                if len(options) > 1:
+                    prompted_choices["instrument"] = selected_row[0]
+    else:
+        # fallback to old logic
+        raw_instrument_value = pass_through_config.get("instrument", config.data.get("instrument"))
+        instrument_options = _extract_choice_options(raw_instrument_value)
+        selected_instrument = _resolve_instrument(
+            cli_instrument=instrument,
+            existing_instrument=existing.get("instrument"),
+            options=instrument_options,
+            mount_path=file_path.parent,
+        )
+        platform = pass_through_config.get("platform") or config.data.get("platform")
+        if not platform:
+            # Try to get from new platforms structure
+            platforms_dict = pass_through_config.get("platforms") or config.data.get("platforms")
+            if isinstance(platforms_dict, dict) and len(platforms_dict) == 1:
+                platform = list(platforms_dict.keys())[0]
+        if selected_instrument is not None:
+            if platform and selected_instrument:
+                base_data["instrument"] = f"{platform}_{selected_instrument}"
+            else:
+                base_data["instrument"] = selected_instrument
+            if len(instrument_options) > 1:
+                prompted_choices["instrument"] = base_data["instrument"]
 
     merged_data = {**pass_through_config, **existing, **base_data}
     destination_path = _get_destination_value_to_write(config, pass_through_config)
@@ -456,6 +547,9 @@ def make_yml(
         rendered_data = {}
 
     final_data = {**merged_data, **rendered_data}
+    # Remove config keys not meant for import.yml
+    for unwanted in ("platforms", "instruments"):
+        final_data.pop(unwanted, None)
     final_data = {key: value for key, value in final_data.items() if value is not None}
 
     if not dry_run:

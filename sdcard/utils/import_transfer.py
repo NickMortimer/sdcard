@@ -14,7 +14,7 @@ import yaml
 import psutil
 from sdcard.config import DEFAULT_IMPORT_TEMPLATE
 from sdcard.utils.import_conflicts import _collect_destination_conflicts
-from sdcard.utils.import_metadata import _resolve_destination_path_template, make_yml
+from sdcard.utils.import_metadata import _resolve_destination_path_template, refresh_import_yml_after_clean
 
 
 def _compress_bytes_zstd(raw_bytes: bytes) -> bytes:
@@ -308,6 +308,8 @@ def import_cards(config, card_path, copy, clean, find, file_extension, dry_run: 
                 check_failures.append(f"{card}: missing import.yml")
             continue
 
+        importdetails_pre_clean = dict(importdetails) if isinstance(importdetails, dict) else {}
+
         import_metadata_changed = False
         if not importdetails.get("import_token"):
             importdetails["import_token"] = str(uuid.uuid4())[0:8]
@@ -461,13 +463,10 @@ def import_cards(config, card_path, copy, clean, find, file_extension, dry_run: 
                         process.wait()
 
                 if refresh:
-                    make_yml(
+                    refresh_import_yml_after_clean(
                         importyml,
-                        config,
+                        importdetails_pre_clean,
                         dry_run,
-                        importdetails.get('card_number', 0),
-                        overwrite=True,
-                        refresh=True,
                     )
 
         if not dry_run and (copy or clean):
