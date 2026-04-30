@@ -50,11 +50,16 @@ def _write_file_times_manifest(root_path: Path, output_path: Path) -> None:
     Path(temp_name).replace(output_path)
 
 
-def _resolve_rsync_path(config) -> Path | str:
+def _resolve_transfer_tool_path(config) -> Path | str:
     if platform.system() == "Windows":
-        bundled = config.catalog_dir / "bin" / "rsync.exe"
+        bundled = config.catalog_dir / "bin" / "rclone.exe"
         if bundled.exists():
             return bundled
+        resolved = shutil.which("rclone")
+        if resolved:
+            return resolved
+        raise typer.Abort("rclone is required on Windows but was not found in PATH")
+
     resolved = shutil.which("rsync")
     if resolved:
         return resolved
@@ -96,8 +101,44 @@ def _build_rsync_command(
     return command
 
 
-def _run_rsync_command(command: list[str], dry_run: bool, operation_label: str) -> None:
-    """Run rsync, streaming progress output to stdout for live table visibility."""
+def _build_rclone_command(
+    rclone_path: Path | str,
+    source: Path,
+    destination: Path,
+    dry_run: bool = False,
+    clean: bool = False,
+    update: bool = False,
+    ignore_errors: bool = False,
+) -> list[str]:
+    command = [
+        str(rclone_path),
+        "copy" if not clean else "move",
+        str(Path(source).resolve()),
+        str(Path(destination).resolve()),
+        "--progress",
+        "--transfers", "4",
+        "--checkers", "8",
+    ]
+
+    if update:
+        command.append("--update")
+    else:
+        command.extend(["--update", "--ignore-existing"])
+    if dry_run:
+        command.append("--dry-run")
+    if ignore_errors:
+        command.append("--ignore-errors")
+
+    return command
+
+
+def _run_transfer_command(
+    command: list[str],
+    dry_run: bool,
+    operation_label: str,
+    tool_name: str,
+) -> None:
+    """Run transfer command, streaming progress output to stdout."""
     logging.info("running %s", shlex.join(command))
     if dry_run:
         return
@@ -120,8 +161,8 @@ def _run_rsync_command(command: list[str], dry_run: bool, operation_label: str) 
     stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
     stderr_thread.start()
 
-    # rsync --info=progress2 uses \r between updates on the same terminal line;
-    # split on both \r and \n so each progress update prints as a separate line.
+    # Both rsync and rclone progress can use carriage returns for in-place updates.
+    # Split on both \r and \n so each update prints as a separate line.
     buf = b""
     if process.stdout is not None:
         while True:
@@ -155,10 +196,10 @@ def _run_rsync_command(command: list[str], dry_run: bool, operation_label: str) 
     stderr_thread.join(timeout=1.0)
 
     if process.returncode != 0:
-        typer.echo(f"❌ rsync {operation_label} failed (exit code {process.returncode}).")
+        typer.echo(f"❌ {tool_name} {operation_label} failed (exit code {process.returncode}).")
         if stderr_lines:
-            typer.echo("--- rsync stderr ---\n" + "\n".join(stderr_lines))
-        raise typer.Abort("See above for rsync error details.")
+            typer.echo(f"--- {tool_name} stderr ---\n" + "\n".join(stderr_lines))
+        raise typer.Abort(f"See above for {tool_name} error details.")
 
 
 def _is_source_newer_than_destination(
@@ -412,35 +453,69 @@ def import_cards(config, card_path, copy, clean, find, file_extension, dry_run: 
                     f"ℹ️ Allowing updates for {len(update_allowed_files)} older destination file(s)."
                 )
 
-        rsync_path = _resolve_rsync_path(config)
+        transfer_tool_path = _resolve_transfer_tool_path(config)
+        is_windows = platform.system() == "Windows"
+        transfer_tool_name = "rclone" if is_windows else "rsync"
 
         if copy:
             logging.info(f'{dry_run_log_string}  Copy  {source} --> {destination}')
             destination.mkdir(exist_ok=True, parents=True)
-            copy_command = _build_rsync_command(
-                rsync_path=rsync_path,
-                source=source,
-                destination=destination,
+            if is_windows:
+                copy_command = _build_rclone_command(
+                    rclone_path=transfer_tool_path,
+                    source=source,
+                    destination=destination,
+                    dry_run=dry_run,
+                    clean=False,
+                    update=update,
+                    ignore_errors=ignore_errors,
+                )
+            else:
+                copy_command = _build_rsync_command(
+                    rsync_path=transfer_tool_path,
+                    source=source,
+                    destination=destination,
+                    dry_run=dry_run,
+                    clean=False,
+                    update=update,
+                    ignore_errors=ignore_errors,
+                )
+            _run_transfer_command(
+                copy_command,
                 dry_run=dry_run,
-                clean=False,
-                update=update,
-                ignore_errors=ignore_errors,
+                operation_label="copy",
+                tool_name=transfer_tool_name,
             )
-            _run_rsync_command(copy_command, dry_run=dry_run, operation_label="copy")
 
         if clean:
             logging.info(f'{dry_run_log_string}  Clean  {source} --> {destination}')
             destination.mkdir(exist_ok=True, parents=True)
-            clean_command = _build_rsync_command(
-                rsync_path=rsync_path,
-                source=source,
-                destination=destination,
+            if is_windows:
+                clean_command = _build_rclone_command(
+                    rclone_path=transfer_tool_path,
+                    source=source,
+                    destination=destination,
+                    dry_run=dry_run,
+                    clean=True,
+                    update=update,
+                    ignore_errors=ignore_errors,
+                )
+            else:
+                clean_command = _build_rsync_command(
+                    rsync_path=transfer_tool_path,
+                    source=source,
+                    destination=destination,
+                    dry_run=dry_run,
+                    clean=True,
+                    update=update,
+                    ignore_errors=ignore_errors,
+                )
+            _run_transfer_command(
+                clean_command,
                 dry_run=dry_run,
-                clean=True,
-                update=update,
-                ignore_errors=ignore_errors,
+                operation_label="clean",
+                tool_name=transfer_tool_name,
             )
-            _run_rsync_command(clean_command, dry_run=dry_run, operation_label="clean")
 
             if not dry_run:
                 deleted_count = _delete_source_files_matching_destination(source, destination)

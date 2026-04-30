@@ -1,12 +1,10 @@
-from importlib import import_module
 from pathlib import Path
 from math import ceil
 import logging
-import platform
-import re
 import psutil
-import subprocess
 import yaml
+
+from sdcard.utils.platform_adapters import get_usb_info
 
 
 def get_card_number_from_import_yml(file_path: Path):
@@ -28,29 +26,6 @@ def get_card_number_from_import_yml(file_path: Path):
             logging.error(f"Error reading {file_path}: {exc}")
             return 0
     return 0
-
-
-def get_usb_info(device_path):
-    """Get USB controller info based on platform"""
-    if platform.system() == "Linux":
-        cmd = f"udevadm info -q path -n {device_path}"
-        dev_path = subprocess.getoutput(cmd)
-        if 'usb' in dev_path:
-            host_match = re.search(r'host(\d+)', dev_path)
-            if host_match:
-                return host_match.group(1)
-    else:
-        try:
-            wmi = import_module("wmi")
-            c = wmi.WMI()
-            for disk in c.Win32_DiskDrive():
-                for partition in disk.associators("Win32_DiskDriveToDiskPartition"):
-                    for logical_disk in partition.associators("Win32_LogicalDiskToPartition"):
-                        if logical_disk.DeviceID.replace(":", "") == device_path[0]:
-                            return disk.SCSIPort
-            return None
-        except Exception:
-            return None
 
 
 def get_available_cards(format_type='exfat', maxcardsize=512):
