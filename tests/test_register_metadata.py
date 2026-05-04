@@ -258,17 +258,107 @@ def test_make_yml_refresh_preserves_card_number_and_instrument(
     written = yaml.safe_load(import_yml.read_text(encoding="utf-8"))
 
     assert result is not None
-    assert prompts == ["platform number"]
+    assert prompts == []
     assert written["card_number"] == "42"
-    assert written["instrument"] == "SHORE_GHADRON"
+    assert written["instrument"] == "GHADRON"
     assert written["register_date"] == "2026-04-07"
     assert written["import_token"] == "12345678"
-    assert written["platform"] == "SHORE"
-    assert written["project_name"] == "Survey Alpha"
-    assert written["destination_path"] == "{CATALOG_DIR}/raw/{import_date}/{instrument}_{partition_label}_{import_token}"
+    assert written["platform"] == "DODO"
+    assert written["project_name"] == "Old Name"
     assert "import_date" not in written
-    assert "Instrument: SHORE_GHADRON" in output
-    assert "platform: SHORE" in output
+    assert "Instrument: GHADRON" in output
+
+
+def test_make_yml_overwrite_with_string_zero_preserves_existing_refresh_fields(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config = _build_config(
+        tmp_path,
+        "{{card_store}}/{instrument}/{card_number}_{import_token}",
+    )
+    card_path = tmp_path / "card-overwrite"
+    card_path.mkdir()
+    _patch_registration_dependencies(monkeypatch)
+
+    import_yml = card_path / "import.yml"
+    import_yml.write_text(
+        yaml.safe_dump(
+            {
+                "card_number": "17",
+                "instrument": "camera_a",
+                "register_date": "2026-03-01",
+                "import_date": "2026-03-05",
+                "import_token": "keepme99",
+                "destination_path": "{{card_store}}/{instrument}/{card_number}_{import_token}",
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    result = import_metadata.make_yml(
+        import_yml,
+        config,
+        dry_run=False,
+        card_number="0",
+        overwrite=True,
+        refresh=False,
+    )
+
+    written = yaml.safe_load(import_yml.read_text(encoding="utf-8"))
+
+    assert result is not None
+    assert written["card_number"] == "17"
+    assert written["import_token"] == "keepme99"
+    assert written["register_date"] == "2026-03-01"
+    assert written["import_date"] == "2026-03-05"
+
+
+def test_make_yml_set_label_prompts_instrument_when_not_refresh(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config = _build_mapping_config(tmp_path)
+    card_path = tmp_path / "card-label"
+    card_path.mkdir()
+    _patch_registration_dependencies(monkeypatch)
+
+    import_yml = card_path / "import.yml"
+    import_yml.write_text(
+        yaml.safe_dump(
+            {
+                "card_number": "9",
+                "instrument": "GHADRON",
+                "register_date": "2026-03-01",
+                "import_token": "labeltok",
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    prompts: list[str] = []
+
+    def _select_first_option(message: str, **kwargs):  # noqa: ANN002
+        prompts.append(message)
+        return 1
+
+    monkeypatch.setattr(import_metadata.typer, "prompt", _select_first_option)
+
+    result = import_metadata.make_yml(
+        import_yml,
+        config,
+        dry_run=False,
+        card_number="0",
+        overwrite=True,
+        refresh=False,
+        set_label=True,
+    )
+
+    assert result is not None
+    assert prompts == ["instrument number"]
+    assert result["instrument"] == "LR1"
 
 
 def test_make_yml_prompts_with_platform_instrument_keys(

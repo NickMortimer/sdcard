@@ -19,6 +19,10 @@ from sdcard.utils.cli_probe import probe
 from sdcard.utils.cli_thumbnail import thumbnail
 from sdcard.utils.cli_turbo import turbo
 from sdcard.utils.cli_xif import xif
+from sdcard.utils.cli_scan import scan
+from sdcard.utils.cli_format import format as format_cmd
+from sdcard.utils.cli_getbins import getbins
+from sdcard.utils.cli_workflow import workflow
 
 
 sdcard = typer.Typer(
@@ -38,6 +42,10 @@ sdcard.command('probe')(probe)
 sdcard.command('turbo')(turbo)
 sdcard.command('xif')(xif)
 sdcard.command('thumbnail')(thumbnail)
+sdcard.command('scan')(scan)
+sdcard.command('format')(format_cmd)
+sdcard.command('getbins')(getbins)
+sdcard.command('workflow')(workflow)
 
 
 

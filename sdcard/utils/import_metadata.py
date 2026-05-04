@@ -7,6 +7,7 @@ import typer
 import yaml
 import psutil
 import subprocess
+import shutil
 from jinja2 import Environment, FileSystemLoader, DebugUndefined
 from sdcard.config import DEFAULT_IMPORT_TEMPLATE
 
@@ -33,12 +34,14 @@ DEFAULT_DESTINATION_README_TEMPLATE = """# {{ project_name or 'Unknown project' 
 
 def get_card_media_details(mount_path: Path) -> dict:
     """Get detected size and filesystem type for a mounted card."""
+    import platform as _platform
+    import ctypes
+
     details = {
         'card_size_gb': 0.0,
         'card_format': 'unknown',
         'partition_label': 'unknown',
     }
-    device_path = None
 
     try:
         usage = psutil.disk_usage(str(mount_path))
@@ -46,27 +49,109 @@ def get_card_media_details(mount_path: Path) -> dict:
     except Exception:
         pass
 
-    for partition in psutil.disk_partitions(all=True):
-        if Path(partition.mountpoint) == mount_path:
-            details['card_format'] = partition.fstype or 'unknown'
-            device_path = partition.device
-            break
-
-    if device_path:
-        details['partition_label'] = Path(device_path).name
+    if _platform.system() == 'Windows':
         try:
-            result = subprocess.run(['lsblk', '-no', 'LABEL', device_path], capture_output=True, text=True)
-            if result.returncode == 0:
-                label = result.stdout.strip()
-                if label:
-                    details['partition_label'] = label
+            kernel32 = ctypes.windll.kernel32
+            volume_name_buf = ctypes.create_unicode_buffer(1024)
+            fs_name_buf = ctypes.create_unicode_buffer(1024)
+            serial_number = ctypes.c_uint()
+            max_comp_len = ctypes.c_uint()
+            file_sys_flags = ctypes.c_uint()
+            mount_str = str(mount_path)
+            if not mount_str.endswith('\\'):
+                mount_str += '\\'
+            res = kernel32.GetVolumeInformationW(
+                ctypes.c_wchar_p(mount_str),
+                volume_name_buf,
+                ctypes.sizeof(volume_name_buf),
+                ctypes.byref(serial_number),
+                ctypes.byref(max_comp_len),
+                ctypes.byref(file_sys_flags),
+                fs_name_buf,
+                ctypes.sizeof(fs_name_buf),
+            )
+            if res:
+                details['card_format'] = fs_name_buf.value or 'unknown'
+                details['partition_label'] = volume_name_buf.value or mount_path.name or str(mount_path)
         except Exception:
             pass
+    else:
+        device_path = None
+        for partition in psutil.disk_partitions():
+            if Path(partition.mountpoint) == mount_path:
+                details['card_format'] = partition.fstype or 'unknown'
+                device_path = partition.device
+                break
+
+        if device_path:
+            details['partition_label'] = Path(device_path).name
+            try:
+                result = subprocess.run(['lsblk', '-no', 'LABEL', device_path], capture_output=True, text=True)
+                if result.returncode == 0:
+                    label = result.stdout.strip()
+                    if label:
+                        details['partition_label'] = label
+            except Exception:
+                pass
 
     if details['partition_label'] == 'unknown':
         details['partition_label'] = mount_path.name or str(mount_path)
 
     return details
+
+
+def _set_volume_label(mount_path: Path, label: str, dry_run: bool) -> bool:
+    """Set the volume label for the given mount path. Returns True on success."""
+    try:
+        system = subprocess.getoutput('uname') if False else None
+        import platform
+        system = platform.system()
+        if system == 'Windows':
+            # Use PowerShell Set-Volume
+            drive = str(mount_path)
+            if drive.endswith('\\') or drive.endswith('/'):
+                drive = drive[:-1]
+            # drive should be like 'K:' or 'K:\\'
+            drive_letter = drive[0] if len(drive) >= 2 and drive[1] == ':' else None
+            if not drive_letter:
+                return False
+            cmd = [
+                'powershell', '-NoProfile', '-Command',
+                f"Set-Volume -DriveLetter {drive_letter} -NewFileSystemLabel '{label}'"
+            ]
+            if dry_run:
+                typer.echo(f"Would run: {' '.join(cmd)}")
+                return True
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            if proc.returncode != 0:
+                typer.echo(proc.stdout + proc.stderr)
+            return proc.returncode == 0
+        else:
+            # Unix-like: try exfatlabel or fatlabel
+            device = None
+            for part in psutil.disk_partitions():
+                if Path(part.mountpoint) == mount_path:
+                    device = part.device
+                    break
+            if not device:
+                return False
+            if shutil.which('exfatlabel'):
+                cmd = ['exfatlabel', device, label]
+            elif shutil.which('fatlabel'):
+                cmd = ['fatlabel', device, label]
+            else:
+                typer.echo('No label utility found (exfatlabel/fatlabel).')
+                return False
+            if dry_run:
+                typer.echo(f"Would run: {' '.join(cmd)}")
+                return True
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            if proc.returncode != 0:
+                typer.echo(proc.stdout + proc.stderr)
+            return proc.returncode == 0
+    except Exception as e:
+        typer.echo(f"Error setting volume label: {e}")
+        return False
 
 
 def _render_destination_path(config, import_context: dict, preserve_unknown: bool = False) -> str:
@@ -126,6 +211,27 @@ def _write_destination_readme(destination: Path, importdetails: dict, config) ->
     destination.joinpath("readme.md").write_text(rendered, encoding="utf-8")
 
 
+def _write_destination_readme_for_registration(
+    import_yml_path: Path,
+    importdetails: dict,
+    config,
+) -> None:
+    """Write readme.md alongside the card's import.yml.
+
+    This matches the operator expectation that the README lands on the card next
+    to the freshly-written import.yml.
+    """
+    try:
+        destination = import_yml_path.parent
+        destination.mkdir(parents=True, exist_ok=True)
+
+        typer.echo(f"📝 Writing readme.md to {destination / 'readme.md'}")
+        _write_destination_readme(destination, importdetails, config)
+    except Exception as exc:
+        typer.echo(f"📝 Failed to write readme.md: {exc}")
+        logging.warning(f"Failed to write destination readme for {import_yml_path}: {exc}")
+
+
 def _format_instrument_summary(instrument_value: Any) -> str:
     """Format the configured instrument value for registration output."""
     if isinstance(instrument_value, dict):
@@ -154,6 +260,16 @@ def _report_registration_result(
     typer.echo(f"✏️  {action} {file_path}")
     typer.echo(f"   Instrument: {_format_instrument_summary(instrument)}")
     typer.echo(f"   Destination: {destination_path}")
+    try:
+        media = get_card_media_details(file_path.parent)
+        partition_label = media.get('partition_label') if isinstance(media, dict) else None
+    except Exception:
+        partition_label = None
+    drive = str(file_path.parent)
+    if partition_label:
+        typer.echo(f"   Drive: {partition_label} : {drive}")
+    else:
+        typer.echo(f"   Drive: {drive}")
     if selected_choices:
         for key in sorted(selected_choices):
             if key == "instrument":
@@ -208,8 +324,50 @@ def _match_choice_value(value: str, options: list[tuple[str, str]]) -> str | Non
 
 
 def _prompt_for_choice(field_name: str, options: list[tuple[str, str]], mount_path: Path) -> str:
-    """Prompt operator to select one value from configured options."""
-    typer.echo(f"Select {field_name} for {mount_path}:")
+    """Prompt operator to select one value from configured options.
+
+    The prompt now includes the partition label (if available) before the mount path, e.g.
+    "Select <field> for P4RTK K:\\:".
+    """
+    try:
+        media = get_card_media_details(mount_path)
+        partition_label = media.get('partition_label') if isinstance(media, dict) else None
+    except Exception:
+        partition_label = None
+
+    # On Windows get_card_media_details may not return the volume label; try Win32 API as a fallback
+    if (not partition_label or str(partition_label).lower() == str(mount_path.name).lower()):
+        try:
+            import platform
+            if platform.system() == 'Windows':
+                import ctypes
+                kernel32 = ctypes.windll.kernel32
+                volume_name_buf = ctypes.create_unicode_buffer(1024)
+                fs_name_buf = ctypes.create_unicode_buffer(1024)
+                serial_number = ctypes.c_uint()
+                max_comp_len = ctypes.c_uint()
+                file_sys_flags = ctypes.c_uint()
+                res = kernel32.GetVolumeInformationW(
+                    ctypes.c_wchar_p(str(mount_path)),
+                    volume_name_buf,
+                    ctypes.sizeof(volume_name_buf),
+                    ctypes.byref(serial_number),
+                    ctypes.byref(max_comp_len),
+                    ctypes.byref(file_sys_flags),
+                    fs_name_buf,
+                    ctypes.sizeof(fs_name_buf),
+                )
+                if res and volume_name_buf.value:
+                    partition_label = volume_name_buf.value
+        except Exception:
+            pass
+
+    # Match the list command display: show label followed by a colon and the mount path
+    if partition_label:
+        target_display = f"{partition_label} : {mount_path}"
+    else:
+        target_display = str(mount_path)
+    typer.echo(f"Select {field_name} for {target_display}:")
     for index, (key, label) in enumerate(options, start=1):
         typer.echo(f"  {index}. {key} ({label})")
 
@@ -270,6 +428,32 @@ def _resolve_config_choice_value(
     return _prompt_for_choice(field_name, options, mount_path), True
 
 
+def _resolve_config_choice_value_noninteractive(
+    raw_value: Any,
+    existing_value: Any,
+) -> Any:
+    """Resolve config choices without prompting.
+
+    Preference order:
+    1) existing matching value
+    2) single available option
+    3) first available option (deterministic)
+    """
+    options = _extract_choice_options(raw_value)
+    if not options:
+        return raw_value
+
+    if isinstance(existing_value, str) and existing_value.strip():
+        matched = _match_choice_value(existing_value, options)
+        if matched is not None:
+            return matched
+
+    if len(options) == 1:
+        return options[0][0]
+
+    return options[0][0]
+
+
 def _resolve_config_choices(
     pass_through_config: dict,
     existing: dict,
@@ -294,6 +478,25 @@ def _resolve_config_choices(
             if prompted:
                 prompted_choices[key] = resolved_value
     return resolved, prompted_choices
+
+
+def _resolve_config_choices_noninteractive(
+    pass_through_config: dict,
+    existing: dict,
+    skip_keys: set[str] | None = None,
+) -> dict:
+    """Resolve top-level config choices without prompting the operator."""
+    skip_keys = skip_keys or set()
+    resolved = pass_through_config.copy()
+    for key, raw_value in pass_through_config.items():
+        if key in skip_keys:
+            continue
+        if isinstance(raw_value, (dict, list, tuple, set)):
+            resolved[key] = _resolve_config_choice_value_noninteractive(
+                raw_value,
+                existing.get(key),
+            )
+    return resolved
 
 
 def _resolve_instrument(
@@ -372,8 +575,111 @@ def make_yml(
     refresh=False,
     prompt_card_details=False,
     instrument: str | None = None,
+    set_label: bool = False,
+    format_card: bool = False,
+    format_yes: bool = False,
+    format_full: bool = False,
 ):
     """Create or refresh an import.yml for a card."""
+
+    def _is_auto_card_number(value: Any) -> bool:
+        """Return True when card number means "use existing/prompt"."""
+        if value is None:
+            return True
+        if isinstance(value, str):
+            return value.strip() in {"", "0"}
+        return value == 0
+
+    def _format_card_before_write(
+        mount_path: Path,
+        label: str,
+        dry_run: bool,
+        format_yes: bool,
+    format_full: bool,
+    ) -> bool:
+        """Format the card volume and set the filesystem label.
+
+        Returns True if formatting was performed successfully, False if skipped or failed.
+        """
+        try:
+            try:
+                media = get_card_media_details(mount_path)
+                partition_label = media.get('partition_label') if isinstance(media, dict) else None
+            except Exception:
+                partition_label = None
+
+            drive_display = f"{partition_label} : {mount_path}" if partition_label else str(mount_path)
+            desired_label = label or ""
+
+            import platform as _platform
+            system = _platform.system()
+            cmd: list[str] | None
+
+            if system == 'Windows':
+                drive = str(mount_path)
+                if drive.endswith('\\') or drive.endswith('/'):
+                    drive = drive[:-1]
+                drive_letter = drive[0] if len(drive) >= 2 and drive[1] == ':' else None
+                if not drive_letter:
+                    typer.echo(f"💾 Formatting not supported on {drive_display} (no drive letter); skipping format")
+                    return False
+
+                # Default to quick format. Full format is available via --format-full.
+                # Surface failures by exiting non-zero.
+                full_flag = " -Full" if format_full else ""
+                cmd = [
+                    'powershell',
+                    '-NoProfile',
+                    '-Command',
+                    (
+                        "$ErrorActionPreference='Stop'; "
+                        f"Format-Volume -DriveLetter {drive_letter} -FileSystem exFAT "
+                        f"-NewFileSystemLabel '{desired_label}' -Confirm:$false{full_flag} | Out-Null"
+                    ),
+                ]
+            else:
+                device = None
+                for part in psutil.disk_partitions():
+                    if Path(part.mountpoint) == mount_path:
+                        device = part.device
+                        break
+                if not device:
+                    typer.echo(f"💾 Formatting not supported on {drive_display} (no device); skipping format")
+                    return False
+
+                if shutil.which('mkfs.exfat'):
+                    cmd = ['mkfs.exfat', '-n', desired_label, device]
+                elif shutil.which('mkfs.vfat'):
+                    cmd = ['mkfs.vfat', '-F', '32', '-n', desired_label, device]
+                else:
+                    typer.echo(f"💾 Formatting not supported on {drive_display} (no mkfs tool); skipping format")
+                    return False
+
+            typer.echo(f"💾 Command: {' '.join(cmd)}")
+            if dry_run:
+                typer.echo(f"💾 Would format {drive_display} with label '{desired_label}'")
+                return True
+
+            if not format_yes:
+                if not typer.confirm(
+                    f"Format {drive_display} (current label) as exFAT with new label '{desired_label}'?",
+                    default=False,
+                ):
+                    typer.echo(f"💾 Skipping format for {drive_display}")
+                    return False
+                format_yes = True
+
+            typer.echo(f"💾 Formatting {drive_display} with label '{desired_label}'")
+            proc = subprocess.run(cmd, capture_output=True, text=True)
+            if proc.stdout.strip() or proc.stderr.strip():
+                typer.echo(proc.stdout + proc.stderr)
+            if proc.returncode != 0:
+                typer.echo(f"💾 Format failed for {drive_display} (exit {proc.returncode})")
+                return False
+            return True
+        except Exception as e:
+            typer.echo(f"Formatting failed: {e}")
+            return False
     existing = {}
     preserved_existing = {}
     if file_path.exists():
@@ -384,16 +690,42 @@ def make_yml(
             existing = yaml.safe_load(file_path.read_text(encoding='utf-8')) or {}
         except yaml.YAMLError:
             existing = {}
+        # If caller requested turbo-style refresh, perform it using the current
+        # import.yml contents as the pre-clean snapshot. This mirrors how
+        # turbo/import uses refresh after a clean transfer.
+        if refresh and existing:
+            # Refresh mode mirrors turbo's "after clean" refresh. If formatting is
+            # requested, show it first (and execute only when format_yes is set).
+            if format_card:
+                desired_label = str(existing.get("instrument") or "")
+                _format_card_before_write(
+                    mount_path=file_path.parent,
+                    label=desired_label,
+                    dry_run=dry_run,
+                    format_yes=format_yes,
+                    format_full=format_full,
+                )
+            refreshed = refresh_import_yml_after_clean(file_path, existing, dry_run)
+            if not dry_run:
+                _write_destination_readme_for_registration(file_path, refreshed, config)
+            _report_registration_result(
+                file_path,
+                refreshed.get("instrument"),
+                refreshed.get("destination_path", "-"),
+                dry_run,
+                None,
+            )
+            return refreshed
         if refresh:
             preserved_existing = {
                 "instrument": existing.get("instrument"),
                 "card_number": existing.get("card_number", 0),
             }
             existing = {key: value for key, value in preserved_existing.items() if value not in {None, ""}}
-        if card_number == 0:
+        if _is_auto_card_number(card_number):
             card_number = existing.get('card_number', 0)
 
-    if card_number == 0:
+    if _is_auto_card_number(card_number):
         card_number = typer.prompt(f"Card number [{str(file_path)}]", type=str, default='1')
 
     register_date = (
@@ -453,13 +785,30 @@ def make_yml(
     }
 
     pass_through_config = _get_pass_through_config_values(config)
-    pass_through_config, prompted_choices = _resolve_config_choices(
-        pass_through_config,
-        existing,
-        file_path.parent,
-        skip_keys={"instrument", "platforms"},
-    )
+    if refresh:
+        # Refresh should preserve existing metadata choices on-card.
+        pass_through_config = _resolve_config_choices_noninteractive(
+            pass_through_config,
+            existing,
+            skip_keys={"instrument", "platforms"},
+        )
+        prompted_choices = {}
+    else:
+        # Non-refresh registration can prompt for config choices.
+        pass_through_config, prompted_choices = _resolve_config_choices(
+            pass_through_config,
+            existing,
+            file_path.parent,
+            skip_keys={"instrument", "platforms"},
+        )
     platforms_dict = pass_through_config.get("platforms") or config.data.get("platforms")
+    # Behavior contract:
+    # - refresh=True: preserve existing instrument metadata from import.yml.
+    # - refresh=False and set_label=True: prompt operator to choose instrument.
+    if set_label and not refresh and not instrument:
+        existing_instrument_value = None
+    else:
+        existing_instrument_value = existing.get("instrument")
     if isinstance(platforms_dict, dict) and platforms_dict:
         option_rows = _extract_platform_instrument_options(platforms_dict)
 
@@ -476,8 +825,8 @@ def make_yml(
                         f"Invalid instrument '{instrument}'. Choose one of: {valid}"
                     )
                 selected_key = matched_key
-            elif isinstance(existing.get("instrument"), str) and existing.get("instrument", "").strip():
-                existing_instrument = existing.get("instrument", "").strip()
+            elif isinstance(existing_instrument_value, str) and existing_instrument_value.strip():
+                existing_instrument = existing_instrument_value.strip()
                 matched_key = _match_choice_value(existing_instrument, options)
                 selected_key = matched_key if matched_key else None
             elif len(options) == 1:
@@ -499,7 +848,7 @@ def make_yml(
         instrument_options = _extract_choice_options(raw_instrument_value)
         selected_instrument = _resolve_instrument(
             cli_instrument=instrument,
-            existing_instrument=existing.get("instrument"),
+            existing_instrument=existing_instrument_value,
             options=instrument_options,
             mount_path=file_path.parent,
         )
@@ -552,9 +901,23 @@ def make_yml(
         final_data.pop(unwanted, None)
     final_data = {key: value for key, value in final_data.items() if value is not None}
 
-    if not dry_run:
+    # Optionally format the card before writing import.yml.
+    if format_card:
+        desired_label = str(final_data.get("instrument")) if final_data.get("instrument") else ""
+        _format_card_before_write(
+            mount_path=file_path.parent,
+            label=desired_label,
+            dry_run=dry_run,
+            format_yes=format_yes,
+            format_full=format_full,
+        )
+
+    if dry_run:
+        typer.echo(f"✏️  Would write import.yml to {file_path}")
+    else:
+        typer.echo(f"✏️  Writing import.yml to {file_path}")
         file_path.write_text(yaml.safe_dump(final_data, sort_keys=False), encoding="utf-8")
-        _write_destination_readme(file_path.parent, final_data, config)
+    _write_destination_readme_for_registration(file_path, final_data, config)
 
     _report_registration_result(
         file_path,
@@ -563,6 +926,16 @@ def make_yml(
         dry_run,
         prompted_choices,
     )
+    # Optionally set the volume label to the instrument name
+    try:
+        if set_label and final_data.get("instrument"):
+            desired_label = str(final_data.get("instrument"))
+            ok = _set_volume_label(file_path.parent, desired_label, dry_run)
+            if not ok and not dry_run:
+                typer.echo(f"Failed to set volume label to '{desired_label}' on {file_path.parent}")
+    except Exception:
+        # Don't raise on label-set failure; registration should still succeed
+        pass
     return final_data
 
 
@@ -575,6 +948,10 @@ def register_cards(
     refresh: bool = False,
     prompt_card_details: bool = False,
     instrument: str | None = None,
+    set_label: bool = False,
+    format_card: bool = False,
+    format_yes: bool = False,
+    format_full: bool = False,
 ):
     """
     Register SD cards by creating an import.yml on each card
@@ -595,6 +972,10 @@ def register_cards(
                 refresh,
                 prompt_card_details,
                 instrument,
+                set_label=set_label,
+                format_card=format_card,
+                format_yes=format_yes,
+                format_full=format_full,
             )
             if result is not None:
                 results.append(result)
@@ -608,6 +989,10 @@ def register_cards(
             refresh,
             prompt_card_details,
             instrument,
+            set_label=set_label,
+            format_card=format_card,
+            format_yes=format_yes,
+            format_full=format_full,
         )
         if result is not None:
             results.append(result)

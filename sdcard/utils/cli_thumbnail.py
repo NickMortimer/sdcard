@@ -638,7 +638,8 @@ def thumbnail(
     """Create thumbnail files using previously extracted EXIF metadata only."""
     if copy_meta and shutil.which("exiftool") is None:
         raise typer.BadParameter(
-            "exiftool is required for --copy-meta but was not found in PATH"
+            "exiftool is required for --copy-meta but was not found in PATH. "
+            "Install local binaries with: sdcard getbins --config-path /path/to/config.yml"
         )
 
     if not head_directory.exists():

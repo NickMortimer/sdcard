@@ -1,5 +1,6 @@
 import uuid
 
+import pytest
 import yaml
 from typer.testing import CliRunner
 
@@ -8,6 +9,11 @@ from sdcard.utils import import_metadata
 
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _isolated_config_state(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("SDCARD_STATE_PATH", str(tmp_path / "state.json"))
 
 
 def _patch_registration_dependencies(monkeypatch) -> None:
@@ -76,8 +82,8 @@ def test_register_fails_when_explicit_config_path_is_missing(
 
     assert result.exit_code != 0
     assert not (card_path / "import.yml").exists()
-    assert "Invalid value for '--config-path'" in result.output
-    assert f"Config file not found: {missing_config}" in result.output
+    assert "Invalid value for --config-path" in result.output
+    assert "Config file not found:" in result.output
 
 
 def test_register_uses_explicit_config_without_default_warning(

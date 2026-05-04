@@ -17,6 +17,20 @@ from sdcard.utils.import_conflicts import _collect_destination_conflicts
 from sdcard.utils.import_metadata import _resolve_destination_path_template, refresh_import_yml_after_clean
 
 
+def _safe_echo(message: str) -> None:
+    """Echo text to the console with an ASCII-safe fallback.
+
+    Some Windows terminals/debug consoles default to legacy encodings (e.g. cp1252)
+    and raise UnicodeEncodeError for emoji characters.
+    """
+
+    try:
+        typer.echo(message)
+    except UnicodeEncodeError:
+        sanitized = message.replace("💾 ", "").encode("ascii", "replace").decode("ascii")
+        typer.echo(sanitized)
+
+
 def _compress_bytes_zstd(raw_bytes: bytes) -> bytes:
     try:
         import compression.zstd as std_zstd
@@ -55,10 +69,21 @@ def _resolve_transfer_tool_path(config) -> Path | str:
         bundled = config.catalog_dir / "bin" / "rclone.exe"
         if bundled.exists():
             return bundled
-        resolved = shutil.which("rclone")
+        resolved = shutil.which("rclone") or shutil.which("rclone.exe")
         if resolved:
             return resolved
-        raise typer.Abort("rclone is required on Windows but was not found in PATH")
+        checked = [
+            str(bundled),
+            "PATH:rclone",
+            "PATH:rclone.exe",
+        ]
+        path_hint = os.environ.get("PATH", "")
+        raise typer.Abort(
+            "rclone is required on Windows but was not found for this Python process.\n"
+            f"Checked: {', '.join(checked)}\n"
+            f"Python PATH (prefix): {path_hint[:300]}\n"
+            "Install local binaries with: sdcard getbins --config-path /path/to/config.yml"
+        )
 
     resolved = shutil.which("rsync")
     if resolved:
@@ -109,15 +134,20 @@ def _build_rclone_command(
     clean: bool = False,
     update: bool = False,
     ignore_errors: bool = False,
+    rclone_transfers: int = 4,
+    rclone_checkers: int = 8,
+    single_stream: bool = False,
 ) -> list[str]:
+    transfers = 1 if single_stream else max(1, int(rclone_transfers))
+    checkers = 1 if single_stream else max(1, int(rclone_checkers))
     command = [
         str(rclone_path),
         "copy" if not clean else "move",
         str(Path(source).resolve()),
         str(Path(destination).resolve()),
         "--progress",
-        "--transfers", "4",
-        "--checkers", "8",
+        "--transfers", str(transfers),
+        "--checkers", str(checkers),
     ]
 
     if update:
@@ -319,7 +349,51 @@ def _delete_source_files_matching_destination(
     return deleted_count
 
 
-def import_cards(config, card_path, copy, clean, find, file_extension, dry_run: bool, format_card=False, allow_overwrite: bool = False, check: bool = False, update: bool = False, precheck: bool = False, ignore_errors: bool = False, refresh: bool = False):
+def _build_transfer_candidate_manifest(source_root: Path) -> dict[str, dict[str, int | float]]:
+    """Capture source files that should exist at destination after transfer.
+
+    import.yml and trash metadata files are intentionally excluded from verification.
+    """
+    manifest: dict[str, dict[str, int | float]] = {}
+    for dirpath, _dirnames, filenames in os.walk(source_root):
+        for filename in filenames:
+            source_file = Path(dirpath) / filename
+            relative_path = source_file.relative_to(source_root)
+            rel_text = str(relative_path).replace("\\", "/")
+            lowered = rel_text.lower()
+            basename = Path(lowered).name
+            if basename == "import.yml":
+                continue
+            if lowered.startswith(".trash-") or lowered.endswith(".trashinfo"):
+                continue
+            try:
+                stat_result = source_file.stat()
+            except OSError:
+                continue
+            manifest[rel_text] = {
+                "size": int(stat_result.st_size),
+                "mod_time": float(stat_result.st_mtime),
+            }
+    return manifest
+
+
+def _verify_destination_contains_manifest(
+    destination_root: Path,
+    source_manifest: dict[str, dict[str, int | float]],
+) -> dict[str, object]:
+    """Return verification results for source files expected at destination."""
+    missing_files: list[str] = []
+    for rel_path in source_manifest:
+        destination_file = destination_root / Path(rel_path)
+        if not destination_file.is_file():
+            missing_files.append(rel_path)
+    return {
+        "expected_count": len(source_manifest),
+        "missing_files": sorted(missing_files),
+    }
+
+
+def import_cards(config, card_path, copy, clean, find, file_extension, dry_run: bool, format_card=False, allow_overwrite: bool = False, check: bool = False, update: bool = False, precheck: bool = False, ignore_errors: bool = False, refresh: bool = False, rclone_transfers: int = 4, rclone_checkers: int = 8, single_stream: bool = False, verify: bool = False):
     """Copy or move (clean) SD card contents to the configured card store."""
     import pandas as pd
     _ = file_extension
@@ -393,7 +467,10 @@ def import_cards(config, card_path, copy, clean, find, file_extension, dry_run: 
                 destination = max(matches)
 
         source = Path(card)
-        typer.echo(f"💾 Reading {importdetails['import_token']} from {source} to {destination}")
+        source_manifest: dict[str, dict[str, int | float]] = {}
+        if verify and not dry_run and (copy or clean):
+            source_manifest = _build_transfer_candidate_manifest(source)
+        _safe_echo(f"💾 Reading {importdetails['import_token']} from {source} to {destination}")
 
         if check:
             precheck_result = _precheck_conflicts(source, destination, update=update)
@@ -469,6 +546,9 @@ def import_cards(config, card_path, copy, clean, find, file_extension, dry_run: 
                     clean=False,
                     update=update,
                     ignore_errors=ignore_errors,
+                    rclone_transfers=rclone_transfers,
+                    rclone_checkers=rclone_checkers,
+                    single_stream=single_stream,
                 )
             else:
                 copy_command = _build_rsync_command(
@@ -499,6 +579,9 @@ def import_cards(config, card_path, copy, clean, find, file_extension, dry_run: 
                     clean=True,
                     update=update,
                     ignore_errors=ignore_errors,
+                    rclone_transfers=rclone_transfers,
+                    rclone_checkers=rclone_checkers,
+                    single_stream=single_stream,
                 )
             else:
                 clean_command = _build_rsync_command(
@@ -584,6 +667,23 @@ def import_cards(config, card_path, copy, clean, find, file_extension, dry_run: 
                 _write_file_times_manifest(destination, file_times_path)
             except Exception as e:
                 logging.warning(f"Failed to write file times manifest to {destination}: {e}")
+
+            if verify:
+                verify_result = _verify_destination_contains_manifest(destination, source_manifest)
+                missing_files = verify_result["missing_files"]
+                expected_count = verify_result["expected_count"]
+                if missing_files:
+                    _safe_echo(
+                        f"⛔ Verification failed for {card}: {len(missing_files)} of {expected_count} expected file(s) are missing at destination"
+                    )
+                    for rel_path in missing_files[:10]:
+                        typer.echo(f"  - {rel_path}")
+                    if len(missing_files) > 10:
+                        typer.echo(f"  ... and {len(missing_files) - 10} more")
+                    raise typer.Abort("Verification failed after transfer.")
+                _safe_echo(
+                    f"✅ Verification passed for {card}: all {expected_count} expected file(s) are present at destination"
+                )
 
     if check:
         typer.echo(f"\nChecked {check_checked} card(s).")

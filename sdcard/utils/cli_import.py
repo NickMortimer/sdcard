@@ -4,12 +4,14 @@ import sys
 import os
 import re
 import time
+import platform
 from rich.live import Live
 from rich.table import Table
 from rich.text import Text
 from pathlib import Path
 from sdcard.config import Config
-from sdcard.utils.cards_discovery import list_sdcards
+from sdcard.utils.cards_discovery import list_sdcards, filter_empty_cards
+from sdcard.utils.config_path_cache import resolve_config_path
 from sdcard.utils.cli_defaults import (
     DEFAULT_ALLOW_OVERWRITE,
     DEFAULT_CARD_SIZE,
@@ -24,7 +26,11 @@ from sdcard.utils.cli_defaults import (
     DEFAULT_IGNORE_ERRORS,
     DEFAULT_PRECHECK,
     DEFAULT_REFRESH,
+    DEFAULT_RCLONE_CHECKERS,
+    DEFAULT_RCLONE_TRANSFERS,
+    DEFAULT_SINGLE_STREAM,
     DEFAULT_UPDATE,
+    DEFAULT_VERIFY,
 )
 from sdcard.utils.import_transfer import import_cards
 
@@ -90,6 +96,10 @@ def _run_import_with_live_table(
     file_extension: str,
     format_card: bool,
     ignore_errors: bool,
+    rclone_transfers: int,
+    rclone_checkers: int,
+    single_stream: bool,
+    verify: bool,
 ) -> None:
     command = [sys.executable, "-m", "sdcard.main", "import", *card_path]
     if config_path is not None:
@@ -122,6 +132,15 @@ def _run_import_with_live_table(
         command.append("--format-card")
     if ignore_errors:
         command.append("--ignore-errors")
+    if single_stream:
+        command.append("--single-stream")
+    else:
+        if rclone_transfers != DEFAULT_RCLONE_TRANSFERS:
+            command.extend(["--rclone-transfers", str(rclone_transfers)])
+        if rclone_checkers != DEFAULT_RCLONE_CHECKERS:
+            command.extend(["--rclone-checkers", str(rclone_checkers)])
+    if verify:
+        command.append("--verify")
 
     env = os.environ.copy()
     env["SDCARD_TABLE"] = "1"
@@ -205,13 +224,36 @@ def import_command(
     file_extension: str = typer.Option(DEFAULT_FILE_EXTENSION, help="extension to catalog"),
     format_card: bool = typer.Option(DEFAULT_FORMAT_CARD, help="Format drive after import and move"),
     ignore_errors: bool = typer.Option(DEFAULT_IGNORE_ERRORS, "--ignore-errors", help="Pass --ignore-errors to rsync and continue on file errors"),
+    rclone_transfers: int = typer.Option(DEFAULT_RCLONE_TRANSFERS, "--rclone-transfers", min=1, help="Number of concurrent rclone file transfers (Windows only)"),
+    rclone_checkers: int = typer.Option(DEFAULT_RCLONE_CHECKERS, "--rclone-checkers", min=1, help="Number of concurrent rclone checkers (Windows only)"),
+    single_stream: bool = typer.Option(DEFAULT_SINGLE_STREAM, "--single-stream", help="Use single-stream copy on rclone (equivalent to transfers=1, checkers=1)"),
+    verify: bool = typer.Option(DEFAULT_VERIFY, "--verify", help="Verify all transferable source files are present at destination after import"),
 ):
+    config_path = resolve_config_path(config_path)
     config = Config(config_path)
     if not card_path:
-        card_path = list_sdcards(format_type, card_size)
+        card_path = list_sdcards(format_type, card_size, config)
+    else:
+        # On Windows, "F:" is a valid drive argument but Path("F:") is not the
+        # drive root directory. Normalize drive-only inputs to "F:\\".
+        if platform.system() == "Windows":
+            normalized: list[str] = []
+            for raw in card_path:
+                text = str(raw)
+                if len(text) == 2 and text[1] == ":":
+                    text = text + "\\"
+                normalized.append(text)
+            card_path = normalized
+
+    # Skip cards that have nothing to import (only import.yml present).
+    in_worker_mode = os.environ.get("SDCARD_TABLE") == "1"
+    if not in_worker_mode:
+        card_path, _empty = filter_empty_cards([str(p) for p in card_path])
+        if not card_path:
+            typer.echo("⚠️  No cards with payload files found. Nothing to import.")
+            return
 
     # Avoid nested live tables when import is launched by turbo workers.
-    in_worker_mode = os.environ.get("SDCARD_TABLE") == "1"
     if len(card_path) == 1 and not in_worker_mode:
         _run_import_with_live_table(
             card_path=card_path,
@@ -230,6 +272,10 @@ def import_command(
             file_extension=file_extension,
             format_card=format_card,
             ignore_errors=ignore_errors,
+            rclone_transfers=rclone_transfers,
+            rclone_checkers=rclone_checkers,
+            single_stream=single_stream,
+            verify=verify,
         )
         return
 
@@ -248,4 +294,8 @@ def import_command(
         format_card=format_card,
         ignore_errors=ignore_errors,
         refresh=refresh,
+        rclone_transfers=rclone_transfers,
+        rclone_checkers=rclone_checkers,
+        single_stream=single_stream,
+        verify=verify,
     )
