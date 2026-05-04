@@ -7,12 +7,12 @@ import yaml
 import queue
 import threading
 import time
-import uuid
+import ctypes
 from pathlib import Path
 from collections import defaultdict
-from typer.testing import CliRunner
 from sdcard.config import Config
-from sdcard.utils.cards_discovery import get_available_cards
+from sdcard.utils.cards_discovery import list_sdcards, filter_empty_cards
+from sdcard.utils.platform_adapters import get_windows_drive_reader_map
 from sdcard.utils.cli_defaults import (
     DEFAULT_CARD_SIZE,
     DEFAULT_CHECK,
@@ -25,16 +25,35 @@ from sdcard.utils.cli_defaults import (
     DEFAULT_PRECHECK,
     DEFAULT_QUIET_WORKERS,
     DEFAULT_REFRESH,
+    DEFAULT_RCLONE_CHECKERS,
+    DEFAULT_RCLONE_TRANSFERS,
+    DEFAULT_SINGLE_STREAM,
     DEFAULT_UPDATE,
-)
-from sdcard.utils.usb import (
-    get_complete_usb_card_info, scan_thunderbolt_ports, detect_thunderbolt_upstream_capacity,
-    analyze_destination_capacity, calculate_real_transfer_rate, get_usb_hierarchy_info
+    DEFAULT_VERIFY,
 )
 from rich.live import Live
 from rich.table import Table
 from rich.text import Text
 import re
+from sdcard.utils.config_path_cache import resolve_config_path
+
+
+def _parse_transfer_progress_line(line: str) -> tuple[int, str] | None:
+    """Parse transfer progress percent and speed from rsync or rclone lines."""
+    cleaned = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", line)
+    cleaned = cleaned.replace("\x1b", "")
+
+    # rsync: " 53%   12.34MB/s"
+    rsync_match = re.search(r"(\d{1,3})%\s+([\d.,]+\s*\S+/s)", cleaned)
+    if rsync_match:
+        return int(rsync_match.group(1)), rsync_match.group(2).strip()
+
+    # rclone: "..., 61%, 12.3 MiB/s, ETA ..."
+    rclone_match = re.search(r"(\d{1,3})%,\s*([\d.,]+\s*\S+/s)", cleaned)
+    if rclone_match:
+        return int(rclone_match.group(1)), rclone_match.group(2).strip()
+
+    return None
 
 
 def _card_passes_import_check(
@@ -121,67 +140,14 @@ def _card_has_remaining_payload_files(card_path: str) -> bool:
     return False
 
 
-def _write_new_import_yml_after_clean(card_path: str) -> None:
-    """Write a fresh import.yml to card after successful clean, preserving instrument name.
-    
-    Reads the existing import.yml to extract the instrument field,
-    then writes a new import.yml with card_number reset to 1 and import-related
-    fields cleared (import_date, import_token).
-    """
-    card_root = Path(card_path)
-    import_yml_path = card_root / "import.yml"
-    
-    if not import_yml_path.exists():
-        return
-    
-    try:
-        # Read existing import.yml to get instrument and card_number
-        with open(import_yml_path, 'r') as f:
-            existing = yaml.safe_load(f) or {}
-        
-        instrument = existing.get('instrument', 'unknown')
-        card_number = existing.get('card_number', 1)
-        
-        # Generate new import_token
-        import_token = str(uuid.uuid4())[:8].replace('-', '')
-        
-        # Always get destination_path from config file
-        from sdcard.config import Config
-        config_path = None
-        # Try to find config path from parent directory
-        for parent in card_root.parents:
-            candidate = parent / "import.yml"
-            if candidate.exists():
-                config_path = str(candidate)
-                break
-        config = Config(config_path) if config_path else Config()
-        destination_path = config.data.get('import_path_template') or config.data.get('destination_path')
-
-        # Build new import.yml preserving instrument and card_number, with fresh token
-        new_yml = {
-            'field_trip_id': existing.get('field_trip_id', ''),
-            'start_date': existing.get('start_date', ''),
-            'end_date': existing.get('end_date', ''),
-            'custodian': existing.get('custodian', ''),
-            'email': existing.get('email', ''),
-            'project_name': existing.get('project_name', ''),
-            'instrument': instrument,
-            'card_number': card_number,
-            'import_token': import_token,
-            'destination_path': destination_path,
-            # Clear import_date so it's set fresh on next import
-        }
-
-        # Only include non-empty fields
-        new_yml = {k: v for k, v in new_yml.items() if v}
-
-        # Write the new import.yml
-        with open(import_yml_path, 'w') as f:
-            yaml.dump(new_yml, f, default_flow_style=False, sort_keys=False)
-
-        print(f"✏️  Updated import.yml on {card_path} (instrument='{instrument}', card_number={card_number}, token='{import_token}', destination_path='{destination_path}')")
-    except Exception as e:
-        print(f"⚠️  Could not update import.yml on {card_path}: {e}")
+def _split_card_group(card_paths: list[str], max_group_size: int = 2) -> list[list[str]]:
+    """Split a card list into fixed-size groups (default: 2)."""
+    if max_group_size <= 1:
+        return [[card] for card in card_paths]
+    return [
+        card_paths[i:i + max_group_size]
+        for i in range(0, len(card_paths), max_group_size)
+    ]
 
 
 def _run_parallel_import_workers(
@@ -193,9 +159,13 @@ def _run_parallel_import_workers(
     ignore_errors: bool = False,
     update: bool = False,
     refresh: bool = False,
+    rclone_transfers: int = DEFAULT_RCLONE_TRANSFERS,
+    rclone_checkers: int = DEFAULT_RCLONE_CHECKERS,
+    single_stream: bool = DEFAULT_SINGLE_STREAM,
+    verify: bool = DEFAULT_VERIFY,
 ) -> None:
     """Run import workers as child processes and show a live per-card status table."""
-    processes: dict[str, subprocess.Popen] = {}
+    processes: dict[str, subprocess.Popen | None] = {}
     output_queue: queue.Queue[tuple[str, str]] = queue.Queue()
     reader_threads: list[threading.Thread] = []
     env = os.environ.copy()
@@ -205,12 +175,64 @@ def _run_parallel_import_workers(
     card_order: list[str] = []
     current_card_by_worker: dict[str, str | None] = {}
     worker_status: dict[str, str] = {}
+    worker_verify_passed: dict[str, bool] = {}
+    worker_pending_verified: dict[str, bool] = {}
+    card_display_cache: dict[str, str] = {}
+
+    def _get_windows_volume_label(card_path: str) -> str | None:
+        if platform.system() != "Windows":
+            return None
+        try:
+            mountpoint = str(card_path)
+            if len(mountpoint) == 2 and mountpoint[1] == ":":
+                mountpoint = mountpoint + "\\"
+            if not mountpoint.endswith("\\"):
+                mountpoint = mountpoint + "\\"
+
+            kernel32 = ctypes.windll.kernel32
+            volume_name_buf = ctypes.create_unicode_buffer(1024)
+            fs_name_buf = ctypes.create_unicode_buffer(1024)
+            serial_number = ctypes.c_uint()
+            max_comp_len = ctypes.c_uint()
+            file_sys_flags = ctypes.c_uint()
+            result = kernel32.GetVolumeInformationW(
+                ctypes.c_wchar_p(mountpoint),
+                volume_name_buf,
+                ctypes.sizeof(volume_name_buf),
+                ctypes.byref(serial_number),
+                ctypes.byref(max_comp_len),
+                ctypes.byref(file_sys_flags),
+                fs_name_buf,
+                ctypes.sizeof(fs_name_buf),
+            )
+            if result and volume_name_buf.value:
+                return volume_name_buf.value.strip()
+        except Exception:
+            return None
+        return None
+
+    def _format_card_display(card_path: str) -> str:
+        cached = card_display_cache.get(card_path)
+        if cached is not None:
+            return cached
+
+        label = _get_windows_volume_label(card_path)
+        if label:
+            drive = str(card_path)
+            if len(drive) >= 2 and drive[1] == ":":
+                drive = drive[:2]
+            display = f"{drive}{label}"
+        else:
+            display = card_path
+
+        card_display_cache[card_path] = display
+        return display
 
     def _status_style(status: str) -> str:
         lowered = status.lower()
         if lowered in {"queued"}:
             return "grey62"
-        if lowered in {"done"}:
+        if lowered in {"done", "complete", "verified"}:
             return "green"
         if lowered in {"reading", "copying", "running", "working"}:
             return "orange1"
@@ -258,14 +280,39 @@ def _run_parallel_import_workers(
         return card_path
 
     def _update_worker_state(worker_name: str, line: str) -> None:
-        reading_match = re.match(r"^💾 Reading (\S+) from (.+) to (.+)$", line)
+        if line == "__WORKER_COMPLETE__":
+            card_key = current_card_by_worker.get(worker_name)
+            if card_key and card_key in card_state:
+                state = card_state[card_key]
+                state["status"] = "complete"
+                state["progress_bar"] = _progress_bar(100)
+                state["speed"] = "-"
+            worker_status[worker_name] = "complete"
+            if worker_verify_passed.get(worker_name, False):
+                worker_pending_verified[worker_name] = True
+            return
+
+        if line == "__WORKER_FAILED__":
+            card_key = current_card_by_worker.get(worker_name)
+            if card_key and card_key in card_state:
+                state = card_state[card_key]
+                state["status"] = "failed"
+                state["speed"] = "-"
+            worker_status[worker_name] = "failed"
+            return
+
+        if "verification passed for" in line.lower():
+            worker_verify_passed[worker_name] = True
+            return
+
+        reading_match = re.match(r"^(?:💾\s*)?Reading (\S+) from (.+) to (.+)$", line)
         if reading_match:
             _token, card_path, destination_path = reading_match.groups()
             previous_card = current_card_by_worker.get(worker_name)
             if previous_card and previous_card in card_state:
                 previous_state = card_state[previous_card]
                 if str(previous_state["status"]) in {"reading", "copying", "working"}:
-                    previous_state["status"] = "done"
+                    previous_state["status"] = "complete"
                     previous_state["progress_bar"] = _progress_bar(100)
                     previous_state["speed"] = "-"
 
@@ -273,7 +320,7 @@ def _run_parallel_import_workers(
             if card_key not in card_state:
                 card_state[card_key] = {
                     "worker": worker_name,
-                    "card": _short_path(card_path, 24),
+                    "card": _short_path(_format_card_display(card_path), 24),
                     "destination": "-",
                     "speed": "-",
                     "progress_bar": _progress_bar(0),
@@ -289,22 +336,20 @@ def _run_parallel_import_workers(
             current_card_by_worker[worker_name] = card_key
             worker_status[worker_name] = "working"
             return
-        progress_match = re.search(
-            r"(\d{1,3})%\s+([\d.,]+\s*\S+/s)",
-            line,
-        )
-        if progress_match:
+
+        progress = _parse_transfer_progress_line(line)
+        if progress:
             card_key = current_card_by_worker.get(worker_name)
             if not card_key or card_key not in card_state:
                 return
-            percent = int(progress_match.group(1))
-            speed = progress_match.group(2).strip()
+            percent, speed = progress
             state = card_state[card_key]
             state["speed"] = speed
             state["progress_bar"] = _progress_bar(percent)
             state["status"] = "copying"
             worker_status[worker_name] = "working"
             return
+
         if "error" in line.lower() or "failed" in line.lower():
             card_key = current_card_by_worker.get(worker_name)
             if not card_key or card_key not in card_state:
@@ -315,15 +360,29 @@ def _run_parallel_import_workers(
             state["status"] = "error"
             worker_status[worker_name] = "error"
 
+    def _promote_verified_cards() -> None:
+        for worker_name, pending_verified in list(worker_pending_verified.items()):
+            if not pending_verified:
+                continue
+            card_key = current_card_by_worker.get(worker_name)
+            if card_key and card_key in card_state:
+                state = card_state[card_key]
+                if str(state["status"]) == "complete":
+                    state["status"] = "verified"
+            worker_status[worker_name] = "verified"
+            worker_pending_verified[worker_name] = False
+
     for worker_name, cards in worker_assignments.items():
         current_card_by_worker[worker_name] = None
         worker_status[worker_name] = "queued"
+        worker_verify_passed[worker_name] = False
+        worker_pending_verified[worker_name] = False
         for card in cards:
             if card in card_state:
                 continue
             card_state[card] = {
                 "worker": worker_name,
-                "card": _short_path(card, 24),
+                "card": _short_path(_format_card_display(card), 24),
                 "destination": "-",
                 "speed": "-",
                 "progress_bar": _progress_bar(0),
@@ -331,20 +390,12 @@ def _run_parallel_import_workers(
             }
             card_order.append(card)
 
-    def _stream_worker_output(worker_name: str, process: subprocess.Popen) -> None:
-        if process.stdout is None:
-            return
-        for line in process.stdout:
-            output_queue.put((worker_name, line.rstrip("\r\n")))
-        process.stdout.close()
-
-    for worker_name, cards in worker_assignments.items():
-        if not cards:
-            continue
-
+    def _build_import_command(cards: list[str]) -> list[str]:
         command = [sys.executable, "-m", "sdcard.main", "import", *cards]
         if clean:
             command.append("--clean")
+        if refresh:
+            command.append("--refresh")
         if precheck:
             command.append("--precheck")
         if update:
@@ -353,40 +404,72 @@ def _run_parallel_import_workers(
             command.extend(["--config-path", config_path])
         if ignore_errors:
             command.append("--ignore-errors")
+        if single_stream:
+            command.append("--single-stream")
+        else:
+            if rclone_transfers != DEFAULT_RCLONE_TRANSFERS:
+                command.extend(["--rclone-transfers", str(rclone_transfers)])
+            if rclone_checkers != DEFAULT_RCLONE_CHECKERS:
+                command.extend(["--rclone-checkers", str(rclone_checkers)])
+        if verify:
+            command.append("--verify")
+        return command
 
-        process = subprocess.Popen(
-            command,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-        processes[worker_name] = process
-        worker_status[worker_name] = "running"
-        def _capture_and_print(worker_name, process):
-            output = []
+    def _capture_and_print(worker_name: str, cards: list[str]) -> None:
+        output: list[str] = []
+        worker_failed = False
+        last_return_code = 0
+        for card_path in cards:
+            output_queue.put((worker_name, f"🧵 {worker_name} starting {card_path}"))
+            process = subprocess.Popen(
+                _build_import_command([card_path]),
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            processes[worker_name] = process
+            worker_status[worker_name] = "running"
             if process.stdout is not None:
                 for line in process.stdout:
-                    output.append(line.rstrip("\r\n"))
-                    if not quiet_workers:
-                        output_queue.put((worker_name, line.rstrip("\r\n")))
+                    line = line.rstrip("\r\n")
+                    output.append(line)
+                    output_queue.put((worker_name, line))
                 process.stdout.close()
             process.wait()
+            last_return_code = process.returncode or 0
             if process.returncode != 0:
-                print(f"\n❌ Worker {worker_name} failed with exit code {process.returncode}")
-                print(f"--- Worker {worker_name} output ---")
-                print("\n".join(output))
+                worker_failed = True
+                output_queue.put((worker_name, f"🧵 {worker_name} failed {card_path} exit={process.returncode}"))
+                break
+        output_queue.put((worker_name, "__WORKER_FAILED__" if worker_failed else "__WORKER_COMPLETE__"))
+        processes.pop(worker_name, None)
+        if output and not quiet_workers:
+            return
+        if output and worker_failed:
+            print(f"\n❌ Worker {worker_name} failed with exit code {last_return_code}")
+            print(f"--- Worker {worker_name} output ---")
+            print("\n".join(output))
+
+    for worker_name, cards in worker_assignments.items():
+        if not cards:
+            continue
+        processes.setdefault(worker_name, None)
         thread = threading.Thread(
             target=_capture_and_print,
-            args=(worker_name, process),
+            args=(worker_name, list(cards)),
             daemon=True,
         )
         thread.start()
         reader_threads.append(thread)
         print(f"   ✅ Launched {worker_name} for {len(cards)} cards")
 
-    if not processes:
+    start_deadline = time.time() + 2.0
+    while processes and all(proc is None for proc in processes.values()) and time.time() < start_deadline:
+        time.sleep(0.05)
+
+    if not processes or all(proc is None for proc in processes.values()):
         print("❌ No import processes were launched")
         return
 
@@ -400,100 +483,111 @@ def _run_parallel_import_workers(
 
     live_context = Live(_build_worker_table(), refresh_per_second=4) if not quiet_workers else None
     if live_context is None:
-        while processes:
-            for worker_name, process in list(processes.items()):
-                return_code = process.poll()
-                if return_code is not None:
-                    left_over_cards: list[str] = []
-                    if return_code == 0 and clean:
-                        for card_path in worker_assignments.get(worker_name, []):
-                            if _card_has_remaining_payload_files(card_path):
-                                left_over_cards.append(card_path)
-                            else:
-                                # Clean succeeded with no remaining files, write fresh import.yml if refresh is set
-                                if refresh:
-                                    _write_new_import_yml_after_clean(card_path)
+        while processes or not output_queue.empty():
+            try:
+                while True:
+                    worker_name, line = output_queue.get_nowait()
+                    if line:
+                        _update_worker_state(worker_name, line)
+            except queue.Empty:
+                pass
 
-                    if left_over_cards:
-                        print(f"❌ {worker_name} finished with files left on {len(left_over_cards)} card(s)")
-                        for card_path in left_over_cards:
-                            print(f"   - {card_path}")
-                    else:
-                        status_icon = "✅" if return_code == 0 else "❌"
-                        print(f"{status_icon} {worker_name} finished with exit code {return_code}")
-                    processes.pop(worker_name, None)
-            if processes:
+            for worker_name, process in list(processes.items()):
+                if process is None:
+                    continue
+                return_code = process.poll()
+                if return_code is None:
+                    continue
+
+                if return_code == 0 and worker_verify_passed.get(worker_name, False):
+                    worker_pending_verified[worker_name] = True
+                elif return_code == 0:
+                    card_key = current_card_by_worker.get(worker_name)
+                    if card_key and card_key in card_state:
+                        card_state[card_key]["status"] = "complete"
+                    worker_status[worker_name] = "complete"
+                else:
+                    worker_status[worker_name] = "failed"
+
+                processes.pop(worker_name, None)
+
+            _promote_verified_cards()
+            if processes or not output_queue.empty():
                 time.sleep(0.2)
     else:
         with live_context as live:
-            while processes:
+            while processes or not output_queue.empty():
                 try:
                     while True:
                         worker_name, line = output_queue.get_nowait()
                         if line:
                             _update_worker_state(worker_name, line)
-                    
                 except queue.Empty:
                     pass
 
                 for worker_name, process in list(processes.items()):
+                    if process is None:
+                        continue
                     return_code = process.poll()
-                    if return_code is not None:
-                        left_over_cards: set[str] = set()
-                        if return_code == 0 and clean:
-                            for card_path in worker_assignments.get(worker_name, []):
-                                if _card_has_remaining_payload_files(card_path):
-                                    left_over_cards.add(card_path)
-                                else:
-                                    # Clean succeeded with no remaining files, write fresh import.yml if refresh is set
-                                    if refresh:
-                                        _write_new_import_yml_after_clean(card_path)
+                    if return_code is None:
+                        continue
 
-                        current_card = current_card_by_worker.get(worker_name)
-                        if current_card and current_card in card_state:
-                            current_state = card_state[current_card]
-                            if current_card in left_over_cards:
-                                current_state["status"] = "failed"
-                                current_state["progress_bar"] = "files left"
-                                current_state["speed"] = "-"
-                            elif return_code == 0 and str(current_state["status"]) in {"reading", "copying", "working"}:
-                                current_state["status"] = "done"
-                                current_state["progress_bar"] = _progress_bar(100)
-                                current_state["speed"] = "-"
-                            elif return_code != 0 and str(current_state["status"]) != "done":
-                                current_state["status"] = "error"
-                                current_state["speed"] = "-"
+                    left_over_cards: set[str] = set()
+                    if return_code == 0 and clean:
+                        for card_path in worker_assignments.get(worker_name, []):
+                            if _card_has_remaining_payload_files(card_path):
+                                left_over_cards.add(card_path)
 
-                        for card_key in card_order:
-                            state = card_state[card_key]
-                            if state["worker"] != worker_name:
-                                continue
-                            if card_key in left_over_cards:
+                    current_card = current_card_by_worker.get(worker_name)
+                    if current_card and current_card in card_state:
+                        current_state = card_state[current_card]
+                        if current_card in left_over_cards:
+                            current_state["status"] = "failed"
+                            current_state["progress_bar"] = "files left"
+                            current_state["speed"] = "-"
+                        elif return_code == 0 and str(current_state["status"]) in {"reading", "copying", "working"}:
+                            current_state["status"] = "complete"
+                            current_state["progress_bar"] = _progress_bar(100)
+                            current_state["speed"] = "-"
+                            if worker_verify_passed.get(worker_name, False):
+                                worker_pending_verified[worker_name] = True
+                        elif return_code != 0 and str(current_state["status"]) not in {"done", "complete", "verified"}:
+                            current_state["status"] = "error"
+                            current_state["speed"] = "-"
+
+                    for card_key in card_order:
+                        state = card_state[card_key]
+                        if state["worker"] != worker_name:
+                            continue
+                        if card_key in left_over_cards:
+                            state["status"] = "failed"
+                            state["speed"] = "-"
+                            state["progress_bar"] = "files left"
+                            continue
+                        if str(state["status"]) == "queued":
+                            if return_code == 0:
+                                state["status"] = "complete"
+                                state["progress_bar"] = _progress_bar(100)
+                            else:
                                 state["status"] = "failed"
-                                state["speed"] = "-"
-                                state["progress_bar"] = "files left"
-                                continue
-                            if str(state["status"]) == "queued":
-                                if return_code == 0:
-                                    state["status"] = "done"
-                                    state["progress_bar"] = _progress_bar(100)
-                                else:
-                                    state["status"] = "failed"
 
-                        worker_status[worker_name] = (
-                            "done" if return_code == 0 and not left_over_cards else "failed"
-                        )
-                        if return_code == 0:
-                            current_card_by_worker[worker_name] = None
-                        processes.pop(worker_name, None)
+                    if return_code == 0 and not left_over_cards:
+                        worker_status[worker_name] = "complete"
+                    else:
+                        worker_status[worker_name] = "failed"
 
+                    if return_code == 0:
+                        current_card_by_worker[worker_name] = current_card
+                    processes.pop(worker_name, None)
+
+                _promote_verified_cards()
                 live.update(_build_worker_table())
-                if processes:
+                if processes or not output_queue.empty():
                     time.sleep(0.2)
 
         for worker_name in sorted(worker_status):
             status = worker_status[worker_name]
-            status_icon = "✅" if status == "done" else "❌"
+            status_icon = "✅" if status in {"done", "complete", "verified"} else "❌"
             print(f"{status_icon} {worker_name} {status}")
 
     for thread in reader_threads:
@@ -511,6 +605,10 @@ def turbo(config_path: str = typer.Option(None, help="Path to config directory."
          precheck: bool = typer.Option(DEFAULT_PRECHECK, "--precheck", help="Run destination conflict prechecks before copy/move"),
          quiet_workers: bool = typer.Option(DEFAULT_QUIET_WORKERS, "--quiet-workers", help="Hide worker output and only show process status"),
          ignore_errors: bool = typer.Option(DEFAULT_IGNORE_ERRORS, "--ignore-errors", help="Pass --ignore-errors to rsync and continue on file errors"),
+         rclone_transfers: int = typer.Option(DEFAULT_RCLONE_TRANSFERS, "--rclone-transfers", min=1, help="Number of concurrent rclone file transfers per worker (Windows only)"),
+         rclone_checkers: int = typer.Option(DEFAULT_RCLONE_CHECKERS, "--rclone-checkers", min=1, help="Number of concurrent rclone checkers per worker (Windows only)"),
+         single_stream: bool = typer.Option(DEFAULT_SINGLE_STREAM, "--single-stream", help="Use single-stream copy on rclone (equivalent to transfers=1, checkers=1)"),
+         verify: bool = typer.Option(DEFAULT_VERIFY, "--verify", help="Verify all transferable source files are present at destination after import"),
          debug:bool = typer.Option(DEFAULT_DEBUG, help="Card format type"),
          max_sd_speed:float = typer.Option(DEFAULT_MAX_SD_SPEED, help="Maximum realistic SD card read speed in MB/s"),
          dest_write_speed:float = typer.Option(None, help="Override destination drive write speed in MB/s (auto-detect if not specified)")):
@@ -519,8 +617,16 @@ def turbo(config_path: str = typer.Option(None, help="Path to config directory."
     launching multiple processes to handle concurrent imports.
     It supports both Linux and Windows environments.
     """
+    from sdcard.utils.usb import (
+        analyze_destination_capacity,
+        calculate_real_transfer_rate,
+        detect_thunderbolt_upstream_capacity,
+        get_complete_usb_card_info,
+        get_usb_hierarchy_info,
+        scan_thunderbolt_ports,
+    )
+    config_path = str(resolve_config_path(config_path) or "") or None
     if platform.system() == "Linux":
-        runner = CliRunner()
         config = Config(config_path)
         destination_path = config.get_path('card_store')
         # Get USB card info and available ports (filtered by size and format)
@@ -648,21 +754,21 @@ def turbo(config_path: str = typer.Option(None, help="Path to config directory."
             ignore_errors=ignore_errors,
             update=update,
             refresh=refresh,
+            rclone_transfers=rclone_transfers,
+            rclone_checkers=rclone_checkers,
+            single_stream=single_stream,
+            verify=verify,
         )
     else:
-        # Windows version - use existing get_available_cards function
-        runner = CliRunner()
-        
-        # Get available cards using the existing function
-        drives_info = get_available_cards(format_type, card_size)
-        
-        # Filter for cards with import.yml and extract mountpoints
-        valid_drives = []
-        
-        for drive_info in drives_info:
-            mountpoint = drive_info['mountpoint']
+        # Windows version - use lightweight mountpoint discovery to avoid
+        # slow WMI/USB host probing during startup.
+        config = Config(config_path)
+        discovered_cards = list_sdcards(format_type, card_size, config)
+
+        # Filter for cards with import.yml
+        valid_drives: list[str] = []
+        for mountpoint in discovered_cards:
             import_yml_path = Path(mountpoint) / "import.yml"
-            
             if import_yml_path.exists():
                 valid_drives.append(mountpoint)
             else:
@@ -670,6 +776,11 @@ def turbo(config_path: str = typer.Option(None, help="Path to config directory."
         
         if not valid_drives:
             print("❌ No valid Windows drives found for import")
+            return
+
+        valid_drives, _empty = filter_empty_cards(valid_drives)
+        if not valid_drives:
+            print("⚠️  All cards contain only import.yml — nothing to import")
             return
         
         print(f"📊 Found {len(valid_drives)} Windows drives, using {max_processes} terminals")
@@ -682,21 +793,38 @@ def turbo(config_path: str = typer.Option(None, help="Path to config directory."
             print("❌ Invalid max_processes value, must be greater than 0")
             return
 
-        # Group drives into terminal assignments using round-robin
+        reader_map = get_windows_drive_reader_map()
+        host_groups: dict[str, list[str]] = defaultdict(list)
+        for drive in valid_drives:
+            drive_letter = str(drive)[0:1].upper()
+            host_key = reader_map.get(drive_letter, f"drive-{drive_letter}")
+            host_groups[host_key].append(drive)
+
+        # If discovery collapses all cards into one bucket, preserve throughput
+        # by splitting at drive level instead of idling all but one worker.
+        if len(host_groups) == 1 and len(valid_drives) > 1 and max_processes > 1:
+            host_groups = defaultdict(list)
+            for drive in valid_drives:
+                drive_letter = str(drive)[0:1].upper()
+                host_groups[f"drive-{drive_letter}"] = [drive]
+
+        # Group host buckets into terminal assignments using round-robin,
+        # while capping each grouped batch to 2 cards.
         terminal_assignments = defaultdict(list)
-        
-        # Round-robin distribute drives to terminals
-        for i, drive in enumerate(valid_drives):
-            terminal_key = f"terminal_{i % max_processes}"
-            if check:
-                allowed_cards, _blocked_cards = _filter_cards_with_check(
-                    [drive],
-                    config_path,
-                    update,
-                )
-                if not allowed_cards:
-                    continue
-            terminal_assignments[terminal_key].append(drive)
+        assignment_index = 0
+        for group_drives in host_groups.values():
+            for split_drives in _split_card_group(group_drives, max_group_size=2):
+                terminal_key = f"terminal_{assignment_index % max_processes}"
+                assignment_index += 1
+                scheduled_drives = split_drives
+                if check:
+                    allowed_cards, _blocked_cards = _filter_cards_with_check(
+                        split_drives,
+                        config_path,
+                        update,
+                    )
+                    scheduled_drives = allowed_cards
+                terminal_assignments[terminal_key].extend(scheduled_drives)
         
         # Launch worker processes directly instead of opening terminal windows
         worker_assignments = {
@@ -716,6 +844,10 @@ def turbo(config_path: str = typer.Option(None, help="Path to config directory."
             ignore_errors=ignore_errors,
             update=update,
             refresh=refresh,
+            rclone_transfers=rclone_transfers,
+            rclone_checkers=rclone_checkers,
+            single_stream=single_stream,
+            verify=verify,
         )
         
         print("✅ Import orchestration completed!")

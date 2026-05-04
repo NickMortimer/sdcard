@@ -1,9 +1,12 @@
 import os
 from pathlib import Path
+from types import SimpleNamespace
 
 from sdcard.utils.import_transfer import (
+    _build_rclone_command,
     _build_rsync_command,
     _delete_source_files_matching_destination,
+    _resolve_transfer_tool_path,
     _write_file_times_manifest,
 )
 
@@ -80,6 +83,87 @@ def test_build_rsync_command_update_allows_newer_overwrite(tmp_path) -> None:
 
     assert "--update" in command
     assert "--ignore-existing" not in command
+
+
+def test_build_rclone_command_uses_no_overwrite_flags(tmp_path) -> None:
+    source = tmp_path / "src"
+    destination = tmp_path / "dst"
+    source.mkdir()
+    destination.mkdir()
+
+    command = _build_rclone_command(
+        rclone_path="rclone",
+        source=source,
+        destination=destination,
+        clean=True,
+    )
+
+    assert command[1] == "move"
+    assert "--update" in command
+    assert "--ignore-existing" in command
+
+
+def test_build_rclone_command_accepts_custom_parallelism(tmp_path) -> None:
+    source = tmp_path / "src"
+    destination = tmp_path / "dst"
+    source.mkdir()
+    destination.mkdir()
+
+    command = _build_rclone_command(
+        rclone_path="rclone",
+        source=source,
+        destination=destination,
+        rclone_transfers=2,
+        rclone_checkers=3,
+    )
+
+    assert "--transfers" in command
+    assert "2" in command
+    assert "--checkers" in command
+    assert "3" in command
+
+
+def test_build_rclone_command_single_stream_overrides_parallelism(tmp_path) -> None:
+    source = tmp_path / "src"
+    destination = tmp_path / "dst"
+    source.mkdir()
+    destination.mkdir()
+
+    command = _build_rclone_command(
+        rclone_path="rclone",
+        source=source,
+        destination=destination,
+        rclone_transfers=5,
+        rclone_checkers=9,
+        single_stream=True,
+    )
+
+    transfers_index = command.index("--transfers")
+    checkers_index = command.index("--checkers")
+    assert command[transfers_index + 1] == "1"
+    assert command[checkers_index + 1] == "1"
+
+
+def test_resolve_transfer_tool_path_windows_uses_rclone(monkeypatch, tmp_path) -> None:
+    config = SimpleNamespace(catalog_dir=tmp_path)
+
+    monkeypatch.setattr("sdcard.utils.import_transfer.platform.system", lambda: "Windows")
+    monkeypatch.setattr("sdcard.utils.import_transfer.shutil.which", lambda name: "C:/Tools/rclone.exe" if name == "rclone" else None)
+
+    resolved = _resolve_transfer_tool_path(config)
+
+    assert resolved == "C:/Tools/rclone.exe"
+
+
+def test_resolve_transfer_tool_path_linux_uses_rsync(monkeypatch, tmp_path) -> None:
+    config = SimpleNamespace(catalog_dir=tmp_path)
+
+    monkeypatch.setattr("sdcard.utils.import_transfer.platform.system", lambda: "Linux")
+    monkeypatch.setattr("sdcard.utils.import_transfer.shutil.which", lambda name: "/usr/bin/rsync" if name == "rsync" else None)
+
+    resolved = _resolve_transfer_tool_path(config)
+
+    assert resolved == "/usr/bin/rsync"
 
 
 def test_delete_source_files_matching_destination_by_mtime_and_size(tmp_path) -> None:

@@ -33,6 +33,24 @@ sdall = typer.Typer(
 )
 
 
+def _parse_transfer_progress(line: str) -> tuple[int, str] | None:
+    """Parse transfer progress percent and speed from rsync or rclone lines."""
+    cleaned = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", line)
+    cleaned = cleaned.replace("\x1b", "")
+
+    # rsync: " 53%   12.34MB/s"
+    rsync_match = re.search(r"(\d{1,3})%\s+([\d.,]+\s*\S+/s)", cleaned)
+    if rsync_match:
+        return int(rsync_match.group(1)), rsync_match.group(2).strip()
+
+    # rclone: "..., 61%, 12.3 MiB/s, ETA ..."
+    rclone_match = re.search(r"(\d{1,3})%,\s*([\d.,]+\s*\S+/s)", cleaned)
+    if rclone_match:
+        return int(rclone_match.group(1)), rclone_match.group(2).strip()
+
+    return None
+
+
 def _run_parallel_import_workers(
     worker_assignments: dict[str, list[str]],
     clean: bool,
@@ -135,16 +153,12 @@ def _run_parallel_import_workers(
             current_card_by_worker[worker_name] = card_key
             worker_status[worker_name] = "working"
             return
-        progress_match = re.search(
-            r"(\d{1,3})%\s+([\d.,]+\s*\S+/s)",
-            line,
-        )
-        if progress_match:
+        progress = _parse_transfer_progress(line)
+        if progress:
             card_key = current_card_by_worker.get(worker_name)
             if not card_key or card_key not in card_state:
                 return
-            percent = int(progress_match.group(1))
-            speed = progress_match.group(2).strip()
+            percent, speed = progress
             state = card_state[card_key]
             state["speed"] = speed
             state["progress_bar"] = _progress_bar(percent)

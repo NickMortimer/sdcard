@@ -33,7 +33,7 @@ def _is_comparison_ignored(rel_path: str) -> bool:
         return True
     if normalized.lower().endswith('.trashinfo'):
         return True
-    if basename in {"readme.md"}:
+    if basename in {"readme.md", "import.yml", "file_times.txt.zst"}:
         return True
     return False
 

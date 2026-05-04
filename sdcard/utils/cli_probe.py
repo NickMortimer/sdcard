@@ -10,11 +10,8 @@ from sdcard.utils.cli_defaults import (
     DEFAULT_FORMAT_TYPE,
     DEFAULT_MAX_SD_SPEED,
 )
-from sdcard.utils.usb import (
-    get_complete_usb_card_info, scan_thunderbolt_ports, detect_thunderbolt_upstream_capacity,
-    analyze_destination_capacity, get_usb_hierarchy_info, get_probe_destinations_info, get_probe_cards_info
-)
 import yaml
+from sdcard.utils.config_path_cache import resolve_config_path
 
 def probe(
     config_path: str = typer.Option(None, help="Path to config directory."),
@@ -24,6 +21,12 @@ def probe(
     dest_write_speed: float = typer.Option(None, help="Override destination drive write speed in MB/s (auto-detect if not specified)")
 ):
     """Probe and analyze USB device tree, SD cards, and system capabilities."""
+    from sdcard.utils.usb import (
+        get_probe_cards_info,
+        get_probe_destinations_info,
+        get_usb_hierarchy_info,
+    )
+    config_path = resolve_config_path(config_path)
     usb_cards, available_ports, thunderbolt_bandwidth, destination_path = get_probe_cards_info(
         config_path, format_type, card_size, max_sd_speed
     )

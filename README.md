@@ -55,6 +55,15 @@ sdcard import
 # Extract EXIF metadata into exif.json.zst files per image directory
 sdcard xif /path/to/head-directory
 
+# Use card_store from config.yml in current directory
+sdcard xif --card-store
+
+# Use card_store from a specific config file
+sdcard xif --card-store --config-path /path/to/config.yml
+
+# Use xif_path from a specific config file (no --card-store needed)
+sdcard xif --config-path /path/to/config.yml
+
 # Restrict EXIF extraction to a specific file extension
 sdcard xif /path/to/head-directory --ext ARW
 
@@ -78,6 +87,38 @@ sdcard xif /path/to/head-directory --workers 8
 
 # Run concurrent imports on Linux
 sdcard turbo
+
+# Download Windows helper binaries into {CATALOG_DIR}/bin
+sdcard getbins --config-path /path/to/config.yml
+
+# Run reusable workflow steps from workflows.yml
+sdcard workflow --list
+sdcard workflow --name quick_xif
+sdcard workflow --name setup_tools --config-path /path/to/config.yml
+
+# Open an interactive workflow menu and keep selecting until exit
+sdcard workflow --file /path/to/workflows.yml
+```
+
+Example workflows file (`workflows.yml`):
+
+```yaml
+workflows:
+    quick_xif:
+        description: Extract EXIF using cached/default config
+        commands:
+            - xif --config-path {config_path}
+
+    setup_tools:
+        description: Ensure local helper binaries exist
+        commands:
+            - getbins --config-path {config_path}
+
+    import_then_probe:
+        description: Import cards then inspect topology
+        commands:
+            - import
+            - probe
 ```
 
 When registration writes an `import.yml`, it preserves the destination template string from the supplied config, prompts for any top-level config value that offers multiple choices, and then prints the instrument plus destination written for each card.
@@ -87,6 +128,11 @@ When registration writes an `import.yml`, it preserves the destination template 
 The `xif` command walks the directory tree below the path you give it. For each
 directory containing supported image files, it writes an `exif.json.zst` file in
 that directory. If that JSON file already exists, the directory is skipped.
+Use `--card-store` to resolve the scan root from `card_store` in config instead
+of passing a directory. Pair it with `--config-path` to point at a non-default
+config file.
+When `--config-path` is provided without a directory, `xif` uses `xif_path`
+from that config file.
 It uses `exiftool`, so ensure `exiftool` is installed and available in `PATH`.
 Use `--batch-size` to tune how many images are sent per `exiftool` call.
 Use `--workers` to control the threadpool size across directories.

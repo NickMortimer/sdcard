@@ -11,6 +11,10 @@ import typer
 from rich.live import Live
 from rich.table import Table
 from rich.text import Text
+from jinja2 import DebugUndefined, Environment
+
+from sdcard.config import Config
+from sdcard.utils.config_path_cache import resolve_config_path
 
 
 IMAGE_SUFFIXES = {
@@ -22,6 +26,7 @@ IMAGE_SUFFIXES = {
     ".heic",
     ".heif",
     ".webp",
+    ".mp4",
     ".3fr",
     ".arw",
     ".cr2",
@@ -40,6 +45,29 @@ IMAGE_SUFFIXES = {
     ".srw",
     ".x3f",
 }
+
+EXIFTOOL_BASE_ARGS = [
+    "exiftool",
+    "-api",
+    "LargeFileSupport=1",
+    "-api",
+    "RequestAll=3",
+    "-j",
+]
+
+
+class _SafeFormatDict(dict):
+    def __missing__(self, key):
+        return "{" + key + "}"
+
+
+def _resolve_config_path_value(raw_path: str, context: dict[str, object]) -> str:
+    """Resolve config path strings with Jinja and single-brace placeholders."""
+    rendered = Environment(undefined=DebugUndefined).from_string(raw_path).render(
+        **context
+    )
+    safe_context = {key: str(value) for key, value in context.items()}
+    return rendered.format_map(_SafeFormatDict(safe_context))
 
 
 def _normalize_extensions(extensions: list[str] | None) -> set[str]:
@@ -82,7 +110,7 @@ def _compress_json_zstd(payload: dict[str, dict[str, object]]) -> bytes:
 
 def _extract_directory_exif(image_files: list[Path]) -> dict[str, dict[str, object]]:
     """Extract metadata for all images in a directory using exiftool JSON output."""
-    command = ["exiftool", "-j", *[str(path) for path in image_files]]
+    command = [*EXIFTOOL_BASE_ARGS, *[str(path) for path in image_files]]
     result = subprocess.run(command, check=False, capture_output=True, text=True)
     if result.returncode != 0:
         rendered = shlex.join(command)
@@ -329,6 +357,7 @@ def extract_exif_tree(
 
     completed_jobs = 0
     total_jobs = len(jobs)
+    failed_messages: list[str] = []
 
     def _on_batch_complete(
         directory: Path,
@@ -394,7 +423,7 @@ def extract_exif_tree(
                         failed += 1
                         job_state[directory]["status"] = "failed"
                         job_state[directory]["progress"] = _progress_bar(100)
-                        typer.echo(
+                        failed_messages.append(
                             f"⛔ Failed EXIF extraction for {directory}: {error_message}"
                         )
 
@@ -414,6 +443,9 @@ def extract_exif_tree(
                     )
                 )
 
+    for message in failed_messages:
+        typer.echo(message)
+
     return {
         "written": written,
         "skipped": skipped,
@@ -424,8 +456,9 @@ def extract_exif_tree(
 
 
 def xif(
-    head_directory: Path = typer.Argument(
-        ..., help="Root directory to scan recursively for image EXIF data"
+    head_directory: Path | None = typer.Argument(
+        None,
+        help="Root directory to scan recursively for image EXIF data",
     ),
     output_name: str = typer.Option(
         "exif.json.zst", "--output-name", help="Per-directory zstd JSON filename"
@@ -447,10 +480,56 @@ def xif(
         "--ext",
         help="Only process files with these extensions; repeat for multiple",
     ),
+    card_store: bool = typer.Option(
+        False,
+        "--card-store",
+        help="Resolve head directory from config card_store",
+    ),
+    config_path: Path | None = typer.Option(
+        None,
+        "--config-path",
+        help="Path to config file used to resolve xif_path",
+    ),
 ) -> None:
     """Extract EXIF metadata into a JSON file in each image directory."""
+    config_path = resolve_config_path(config_path)
     if shutil.which("exiftool") is None:
-        raise typer.BadParameter("exiftool is required but was not found in PATH")
+        if config_path is not None:
+            hint = f"sdcard getbins --config-path {config_path}"
+        else:
+            hint = "sdcard getbins --config-path /path/to/config.yml"
+        raise typer.BadParameter(
+            "exiftool is required but was not found in PATH. "
+            f"Install local binaries with: {hint}"
+        )
+
+    if card_store and head_directory is not None:
+        raise typer.BadParameter(
+            "Cannot pass HEAD_DIRECTORY with --card-store",
+            param_hint="head_directory",
+        )
+
+    if head_directory is None:
+        config = Config(config_path)
+        if card_store:
+            head_directory = config.get_path("card_store")
+            typer.echo(f"🧭 Using card_store from config: {head_directory}")
+        elif config_path is not None:
+            xif_path = config.settings.get("xif_path")
+            if not isinstance(xif_path, str) or not xif_path.strip():
+                raise typer.BadParameter(
+                    "Config must define a non-empty 'xif_path' when HEAD_DIRECTORY is omitted.",
+                    param_hint="--config-path",
+                )
+            resolved_xif_path = _resolve_config_path_value(xif_path, config.settings)
+            head_directory = Path(resolved_xif_path)
+            if not head_directory.is_absolute():
+                head_directory = config.catalog_dir / head_directory
+            typer.echo(f"🧭 Using xif_path from config: {head_directory}")
+        else:
+            raise typer.BadParameter(
+                "Missing HEAD_DIRECTORY. Provide a path, pass --config-path with xif_path, or use --card-store."
+            )
 
     if not head_directory.exists():
         raise typer.BadParameter(f"Path does not exist: {head_directory}")

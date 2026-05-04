@@ -14,7 +14,21 @@ import yaml
 import psutil
 from sdcard.config import DEFAULT_IMPORT_TEMPLATE
 from sdcard.utils.import_conflicts import _collect_destination_conflicts
-from sdcard.utils.import_metadata import _resolve_destination_path_template, make_yml
+from sdcard.utils.import_metadata import _resolve_destination_path_template, refresh_import_yml_after_clean
+
+
+def _safe_echo(message: str) -> None:
+    """Echo text to the console with an ASCII-safe fallback.
+
+    Some Windows terminals/debug consoles default to legacy encodings (e.g. cp1252)
+    and raise UnicodeEncodeError for emoji characters.
+    """
+
+    try:
+        typer.echo(message)
+    except UnicodeEncodeError:
+        sanitized = message.replace("💾 ", "").encode("ascii", "replace").decode("ascii")
+        typer.echo(sanitized)
 
 
 def _compress_bytes_zstd(raw_bytes: bytes) -> bytes:
@@ -50,11 +64,27 @@ def _write_file_times_manifest(root_path: Path, output_path: Path) -> None:
     Path(temp_name).replace(output_path)
 
 
-def _resolve_rsync_path(config) -> Path | str:
+def _resolve_transfer_tool_path(config) -> Path | str:
     if platform.system() == "Windows":
-        bundled = config.catalog_dir / "bin" / "rsync.exe"
+        bundled = config.catalog_dir / "bin" / "rclone.exe"
         if bundled.exists():
             return bundled
+        resolved = shutil.which("rclone") or shutil.which("rclone.exe")
+        if resolved:
+            return resolved
+        checked = [
+            str(bundled),
+            "PATH:rclone",
+            "PATH:rclone.exe",
+        ]
+        path_hint = os.environ.get("PATH", "")
+        raise typer.Abort(
+            "rclone is required on Windows but was not found for this Python process.\n"
+            f"Checked: {', '.join(checked)}\n"
+            f"Python PATH (prefix): {path_hint[:300]}\n"
+            "Install local binaries with: sdcard getbins --config-path /path/to/config.yml"
+        )
+
     resolved = shutil.which("rsync")
     if resolved:
         return resolved
@@ -96,8 +126,49 @@ def _build_rsync_command(
     return command
 
 
-def _run_rsync_command(command: list[str], dry_run: bool, operation_label: str) -> None:
-    """Run rsync, streaming progress output to stdout for live table visibility."""
+def _build_rclone_command(
+    rclone_path: Path | str,
+    source: Path,
+    destination: Path,
+    dry_run: bool = False,
+    clean: bool = False,
+    update: bool = False,
+    ignore_errors: bool = False,
+    rclone_transfers: int = 4,
+    rclone_checkers: int = 8,
+    single_stream: bool = False,
+) -> list[str]:
+    transfers = 1 if single_stream else max(1, int(rclone_transfers))
+    checkers = 1 if single_stream else max(1, int(rclone_checkers))
+    command = [
+        str(rclone_path),
+        "copy" if not clean else "move",
+        str(Path(source).resolve()),
+        str(Path(destination).resolve()),
+        "--progress",
+        "--transfers", str(transfers),
+        "--checkers", str(checkers),
+    ]
+
+    if update:
+        command.append("--update")
+    else:
+        command.extend(["--update", "--ignore-existing"])
+    if dry_run:
+        command.append("--dry-run")
+    if ignore_errors:
+        command.append("--ignore-errors")
+
+    return command
+
+
+def _run_transfer_command(
+    command: list[str],
+    dry_run: bool,
+    operation_label: str,
+    tool_name: str,
+) -> None:
+    """Run transfer command, streaming progress output to stdout."""
     logging.info("running %s", shlex.join(command))
     if dry_run:
         return
@@ -120,8 +191,8 @@ def _run_rsync_command(command: list[str], dry_run: bool, operation_label: str) 
     stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
     stderr_thread.start()
 
-    # rsync --info=progress2 uses \r between updates on the same terminal line;
-    # split on both \r and \n so each progress update prints as a separate line.
+    # Both rsync and rclone progress can use carriage returns for in-place updates.
+    # Split on both \r and \n so each update prints as a separate line.
     buf = b""
     if process.stdout is not None:
         while True:
@@ -155,10 +226,10 @@ def _run_rsync_command(command: list[str], dry_run: bool, operation_label: str) 
     stderr_thread.join(timeout=1.0)
 
     if process.returncode != 0:
-        typer.echo(f"❌ rsync {operation_label} failed (exit code {process.returncode}).")
+        typer.echo(f"❌ {tool_name} {operation_label} failed (exit code {process.returncode}).")
         if stderr_lines:
-            typer.echo("--- rsync stderr ---\n" + "\n".join(stderr_lines))
-        raise typer.Abort("See above for rsync error details.")
+            typer.echo(f"--- {tool_name} stderr ---\n" + "\n".join(stderr_lines))
+        raise typer.Abort(f"See above for {tool_name} error details.")
 
 
 def _is_source_newer_than_destination(
@@ -278,7 +349,51 @@ def _delete_source_files_matching_destination(
     return deleted_count
 
 
-def import_cards(config, card_path, copy, clean, find, file_extension, dry_run: bool, format_card=False, allow_overwrite: bool = False, check: bool = False, update: bool = False, precheck: bool = False, ignore_errors: bool = False, refresh: bool = False):
+def _build_transfer_candidate_manifest(source_root: Path) -> dict[str, dict[str, int | float]]:
+    """Capture source files that should exist at destination after transfer.
+
+    import.yml and trash metadata files are intentionally excluded from verification.
+    """
+    manifest: dict[str, dict[str, int | float]] = {}
+    for dirpath, _dirnames, filenames in os.walk(source_root):
+        for filename in filenames:
+            source_file = Path(dirpath) / filename
+            relative_path = source_file.relative_to(source_root)
+            rel_text = str(relative_path).replace("\\", "/")
+            lowered = rel_text.lower()
+            basename = Path(lowered).name
+            if basename == "import.yml":
+                continue
+            if lowered.startswith(".trash-") or lowered.endswith(".trashinfo"):
+                continue
+            try:
+                stat_result = source_file.stat()
+            except OSError:
+                continue
+            manifest[rel_text] = {
+                "size": int(stat_result.st_size),
+                "mod_time": float(stat_result.st_mtime),
+            }
+    return manifest
+
+
+def _verify_destination_contains_manifest(
+    destination_root: Path,
+    source_manifest: dict[str, dict[str, int | float]],
+) -> dict[str, object]:
+    """Return verification results for source files expected at destination."""
+    missing_files: list[str] = []
+    for rel_path in source_manifest:
+        destination_file = destination_root / Path(rel_path)
+        if not destination_file.is_file():
+            missing_files.append(rel_path)
+    return {
+        "expected_count": len(source_manifest),
+        "missing_files": sorted(missing_files),
+    }
+
+
+def import_cards(config, card_path, copy, clean, find, file_extension, dry_run: bool, format_card=False, allow_overwrite: bool = False, check: bool = False, update: bool = False, precheck: bool = False, ignore_errors: bool = False, refresh: bool = False, rclone_transfers: int = 4, rclone_checkers: int = 8, single_stream: bool = False, verify: bool = False):
     """Copy or move (clean) SD card contents to the configured card store."""
     import pandas as pd
     _ = file_extension
@@ -307,6 +422,8 @@ def import_cards(config, card_path, copy, clean, find, file_extension, dry_run: 
             if check:
                 check_failures.append(f"{card}: missing import.yml")
             continue
+
+        importdetails_pre_clean = dict(importdetails) if isinstance(importdetails, dict) else {}
 
         import_metadata_changed = False
         if not importdetails.get("import_token"):
@@ -350,7 +467,10 @@ def import_cards(config, card_path, copy, clean, find, file_extension, dry_run: 
                 destination = max(matches)
 
         source = Path(card)
-        typer.echo(f"💾 Reading {importdetails['import_token']} from {source} to {destination}")
+        source_manifest: dict[str, dict[str, int | float]] = {}
+        if verify and not dry_run and (copy or clean):
+            source_manifest = _build_transfer_candidate_manifest(source)
+        _safe_echo(f"💾 Reading {importdetails['import_token']} from {source} to {destination}")
 
         if check:
             precheck_result = _precheck_conflicts(source, destination, update=update)
@@ -410,35 +530,75 @@ def import_cards(config, card_path, copy, clean, find, file_extension, dry_run: 
                     f"ℹ️ Allowing updates for {len(update_allowed_files)} older destination file(s)."
                 )
 
-        rsync_path = _resolve_rsync_path(config)
+        transfer_tool_path = _resolve_transfer_tool_path(config)
+        is_windows = platform.system() == "Windows"
+        transfer_tool_name = "rclone" if is_windows else "rsync"
 
         if copy:
             logging.info(f'{dry_run_log_string}  Copy  {source} --> {destination}')
             destination.mkdir(exist_ok=True, parents=True)
-            copy_command = _build_rsync_command(
-                rsync_path=rsync_path,
-                source=source,
-                destination=destination,
+            if is_windows:
+                copy_command = _build_rclone_command(
+                    rclone_path=transfer_tool_path,
+                    source=source,
+                    destination=destination,
+                    dry_run=dry_run,
+                    clean=False,
+                    update=update,
+                    ignore_errors=ignore_errors,
+                    rclone_transfers=rclone_transfers,
+                    rclone_checkers=rclone_checkers,
+                    single_stream=single_stream,
+                )
+            else:
+                copy_command = _build_rsync_command(
+                    rsync_path=transfer_tool_path,
+                    source=source,
+                    destination=destination,
+                    dry_run=dry_run,
+                    clean=False,
+                    update=update,
+                    ignore_errors=ignore_errors,
+                )
+            _run_transfer_command(
+                copy_command,
                 dry_run=dry_run,
-                clean=False,
-                update=update,
-                ignore_errors=ignore_errors,
+                operation_label="copy",
+                tool_name=transfer_tool_name,
             )
-            _run_rsync_command(copy_command, dry_run=dry_run, operation_label="copy")
 
         if clean:
             logging.info(f'{dry_run_log_string}  Clean  {source} --> {destination}')
             destination.mkdir(exist_ok=True, parents=True)
-            clean_command = _build_rsync_command(
-                rsync_path=rsync_path,
-                source=source,
-                destination=destination,
+            if is_windows:
+                clean_command = _build_rclone_command(
+                    rclone_path=transfer_tool_path,
+                    source=source,
+                    destination=destination,
+                    dry_run=dry_run,
+                    clean=True,
+                    update=update,
+                    ignore_errors=ignore_errors,
+                    rclone_transfers=rclone_transfers,
+                    rclone_checkers=rclone_checkers,
+                    single_stream=single_stream,
+                )
+            else:
+                clean_command = _build_rsync_command(
+                    rsync_path=transfer_tool_path,
+                    source=source,
+                    destination=destination,
+                    dry_run=dry_run,
+                    clean=True,
+                    update=update,
+                    ignore_errors=ignore_errors,
+                )
+            _run_transfer_command(
+                clean_command,
                 dry_run=dry_run,
-                clean=True,
-                update=update,
-                ignore_errors=ignore_errors,
+                operation_label="clean",
+                tool_name=transfer_tool_name,
             )
-            _run_rsync_command(clean_command, dry_run=dry_run, operation_label="clean")
 
             if not dry_run:
                 deleted_count = _delete_source_files_matching_destination(source, destination)
@@ -461,13 +621,10 @@ def import_cards(config, card_path, copy, clean, find, file_extension, dry_run: 
                         process.wait()
 
                 if refresh:
-                    make_yml(
+                    refresh_import_yml_after_clean(
                         importyml,
-                        config,
+                        importdetails_pre_clean,
                         dry_run,
-                        importdetails.get('card_number', 0),
-                        overwrite=True,
-                        refresh=True,
                     )
 
         if not dry_run and (copy or clean):
@@ -510,6 +667,23 @@ def import_cards(config, card_path, copy, clean, find, file_extension, dry_run: 
                 _write_file_times_manifest(destination, file_times_path)
             except Exception as e:
                 logging.warning(f"Failed to write file times manifest to {destination}: {e}")
+
+            if verify:
+                verify_result = _verify_destination_contains_manifest(destination, source_manifest)
+                missing_files = verify_result["missing_files"]
+                expected_count = verify_result["expected_count"]
+                if missing_files:
+                    _safe_echo(
+                        f"⛔ Verification failed for {card}: {len(missing_files)} of {expected_count} expected file(s) are missing at destination"
+                    )
+                    for rel_path in missing_files[:10]:
+                        typer.echo(f"  - {rel_path}")
+                    if len(missing_files) > 10:
+                        typer.echo(f"  ... and {len(missing_files) - 10} more")
+                    raise typer.Abort("Verification failed after transfer.")
+                _safe_echo(
+                    f"✅ Verification passed for {card}: all {expected_count} expected file(s) are present at destination"
+                )
 
     if check:
         typer.echo(f"\nChecked {check_checked} card(s).")

@@ -1,9 +1,9 @@
-import platform
 import subprocess
-import shutil
 import typer
 import psutil
 import re
+
+from sdcard.utils.platform_adapters import require_command, require_linux
 
 # --- Linux-only mount/unmount commands ---
 
@@ -24,12 +24,8 @@ def mount_cards(
     card_path: list[str] = None,
 ):
     """Mount all exFAT SD cards under the specified size using udisksctl (Linux only)."""
-    if platform.system() != "Linux":
-        typer.echo("❌ The 'mount' command is only supported on Linux.")
-        raise typer.Exit(1)
-    if not shutil.which("udisksctl"):
-        typer.echo("❌ udisksctl not found. Please install udisks2.")
-        raise typer.Exit(1)
+    require_linux("mount")
+    require_command("udisksctl", "Please install udisks2.")
 
     mounted_any = False
     if not all and not card_path:
@@ -86,12 +82,8 @@ def unmount_cards(
     power_off: bool = typer.Option(False, "--power-off", help="Also power off the device (LED goes out, device disappears until replugged)")
 ):
     """Unmount and eject all mounted exFAT SD cards (Linux only): unmount and call system 'eject' command."""
-    if platform.system() != "Linux":
-        typer.echo("❌ The 'unmount' command is only supported on Linux.")
-        raise typer.Exit(1)
-    if not shutil.which("eject"):
-        typer.echo("❌ eject command not found. Please install the 'eject' utility.")
-        raise typer.Exit(1)
+    require_linux("unmount")
+    require_command("eject", "Please install the 'eject' utility.")
 
     ejected_any = False
 
@@ -123,6 +115,9 @@ def mount_command(
     format_type: str = typer.Option('exfat', help="Card format type"),
 ):
     """Mount SD cards by device path or all detected cards."""
+    require_linux("mount")
+    require_command("udisksctl", "Please install udisks2.")
+
     mounted_any = False
     if card_path is None:
         card_path = []
@@ -172,12 +167,8 @@ def eject_cards_command(
     format_type: str = typer.Option('exfat', help="Card format type"),
 ):
     """Eject SD cards by device path or all detected cards."""
-    if platform.system() != "Linux":
-        typer.echo("❌ The 'eject' command is only supported on Linux.")
-        raise typer.Exit(1)
-    if not shutil.which("eject"):
-        typer.echo("❌ eject command not found. Please install the 'eject' utility.")
-        raise typer.Exit(1)
+    require_linux("eject")
+    require_command("eject", "Please install the 'eject' utility.")
     if card_path is None:
         card_path = []
     if all and not card_path:
