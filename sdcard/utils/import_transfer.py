@@ -226,7 +226,7 @@ def _run_transfer_command(
     stderr_thread.join(timeout=1.0)
 
     if process.returncode != 0:
-        typer.echo(f"❌ {tool_name} {operation_label} failed (exit code {process.returncode}).")
+        _safe_echo(f"❌ {tool_name} {operation_label} failed (exit code {process.returncode}).")
         if stderr_lines:
             typer.echo(f"--- {tool_name} stderr ---\n" + "\n".join(stderr_lines))
         raise typer.Abort(f"See above for {tool_name} error details.")
@@ -414,7 +414,7 @@ def import_cards(config, card_path, copy, clean, find, file_extension, dry_run: 
             except yaml.YAMLError as exc:
                 if check:
                     check_failures.append(f"{card}: corrupt import.yml ({exc})")
-                    typer.echo(f"⛔ {card}: corrupt import.yml")
+                    _safe_echo(f"⛔ {card}: corrupt import.yml")
                     continue
                 raise typer.Abort(f"Error possible corrupt yaml {importyml}: {exc}")
         else:
@@ -482,7 +482,7 @@ def import_cards(config, card_path, copy, clean, find, file_extension, dry_run: 
                 check_failures.append(
                     f"{card}: {len(conflicts)} overwrite conflict(s) detected"
                 )
-                typer.echo(
+                _safe_echo(
                     f"⛔ {card}: {len(conflicts)} overwrite conflict(s) detected"
                 )
                 for rel_path in conflicts[:10]:
@@ -490,13 +490,13 @@ def import_cards(config, card_path, copy, clean, find, file_extension, dry_run: 
                 if len(conflicts) > 10:
                     typer.echo(f"  ... and {len(conflicts) - 10} more")
             else:
-                typer.echo(f"✅ {card}: no overwrite conflicts detected")
+                _safe_echo(f"✅ {card}: no overwrite conflicts detected")
                 if update and update_allowed_files:
-                    typer.echo(
+                    _safe_echo(
                         f"ℹ️ {card}: {len(update_allowed_files)} older destination file(s) can be updated"
                     )
                 if likely_partial_files:
-                    typer.echo(
+                    _safe_echo(
                         f"ℹ️ {card}: {len(likely_partial_files)} likely partial destination file(s) ignored"
                     )
             continue
@@ -508,7 +508,7 @@ def import_cards(config, card_path, copy, clean, find, file_extension, dry_run: 
             likely_partial_files = precheck_result["likely_partial_files"]
 
             if conflicts:
-                typer.echo(
+                _safe_echo(
                     f"⛔ Found {len(conflicts)} overwrite conflict(s) before transfer:"
                 )
                 for rel_path in conflicts[:10]:
@@ -519,14 +519,14 @@ def import_cards(config, card_path, copy, clean, find, file_extension, dry_run: 
                     raise typer.Abort(
                         "Precheck found destination conflicts. Use --allow-overwrite to continue anyway."
                     )
-                typer.echo("⚠️ --allow-overwrite is set; continuing despite conflicts.")
+                _safe_echo("⚠️ --allow-overwrite is set; continuing despite conflicts.")
 
             if likely_partial_files:
-                typer.echo(
+                _safe_echo(
                     f"ℹ️ Ignoring {len(likely_partial_files)} likely partial destination file(s)."
                 )
             if update and update_allowed_files:
-                typer.echo(
+                _safe_echo(
                     f"ℹ️ Allowing updates for {len(update_allowed_files)} older destination file(s)."
                 )
 

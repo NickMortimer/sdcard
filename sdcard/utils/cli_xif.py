@@ -108,9 +108,39 @@ def _compress_json_zstd(payload: dict[str, dict[str, object]]) -> bytes:
         ) from exc
 
 
-def _extract_directory_exif(image_files: list[Path]) -> dict[str, dict[str, object]]:
+def _resolve_exiftool_executable(config_path: "Path | None") -> str | None:
+    """Return the exiftool executable path, checking PATH then {CATALOG_DIR}/bin.
+
+    Returns the resolved path string, or None if not found.
+    """
+    import platform
+
+    if shutil.which("exiftool") is not None:
+        return "exiftool"
+
+    if config_path is not None:
+        from sdcard.config import Config
+        catalog_bin = Config(config_path).catalog_dir / "bin"
+        candidates = (
+            ["exiftool.exe", "exiftool"]
+            if platform.system() == "Windows"
+            else ["exiftool"]
+        )
+        for name in candidates:
+            bundled = catalog_bin / name
+            if bundled.is_file():
+                return str(bundled)
+
+    return None
+
+
+def _extract_directory_exif(
+    image_files: list[Path],
+    exiftool_executable: str = "exiftool",
+) -> dict[str, dict[str, object]]:
     """Extract metadata for all images in a directory using exiftool JSON output."""
-    command = [*EXIFTOOL_BASE_ARGS, *[str(path) for path in image_files]]
+    base_args = [exiftool_executable, *EXIFTOOL_BASE_ARGS[1:]]
+    command = [*base_args, *[str(path) for path in image_files]]
     result = subprocess.run(command, check=False, capture_output=True, text=True)
     if result.returncode != 0:
         rendered = shlex.join(command)
@@ -225,10 +255,11 @@ def _build_xif_table(
 def _extract_with_split(
     image_files: list[Path],
     on_files_done,
+    exiftool_executable: str = "exiftool",
 ) -> tuple[dict[str, dict[str, object]], int, bool]:
     """Extract EXIF and recursively split failing batches to isolate bad files."""
     try:
-        metadata = _extract_directory_exif(image_files)
+        metadata = _extract_directory_exif(image_files, exiftool_executable)
         on_files_done(len(image_files), False)
         return metadata, 0, False
     except (RuntimeError, json.JSONDecodeError):
@@ -243,10 +274,12 @@ def _extract_with_split(
     left_metadata, left_failed, left_had_failure = _extract_with_split(
         left,
         on_files_done,
+        exiftool_executable,
     )
     right_metadata, right_failed, right_had_failure = _extract_with_split(
         right,
         on_files_done,
+        exiftool_executable,
     )
 
     merged = dict(left_metadata)
@@ -260,6 +293,7 @@ def _extract_directory_metadata(
     image_files: list[Path],
     batch_size: int,
     on_batch_complete=None,
+    exiftool_executable: str = "exiftool",
 ) -> tuple[Path, bool, str | None, int, bool]:
     """Extract and write EXIF metadata for one directory."""
     output_path = directory / output_name
@@ -276,6 +310,7 @@ def _extract_directory_metadata(
                     if on_batch_complete is not None
                     else None
                 ),
+                exiftool_executable,
             )
             directory_metadata.update(batch_metadata)
             failed_files += batch_failed_count
@@ -303,6 +338,7 @@ def extract_exif_tree(
     batch_size: int,
     workers: int,
     allowed_suffixes: set[str],
+    exiftool_executable: str = "exiftool",
 ) -> dict[str, int]:
     """Walk a directory tree and write one EXIF JSON file per image directory."""
     written = 0
@@ -389,6 +425,7 @@ def extract_exif_tree(
                 image_files,
                 batch_size,
                 _on_batch_complete,
+                exiftool_executable,
             )
             futures[future] = directory
 
@@ -493,13 +530,14 @@ def xif(
 ) -> None:
     """Extract EXIF metadata into a JSON file in each image directory."""
     config_path = resolve_config_path(config_path)
-    if shutil.which("exiftool") is None:
+    exiftool_executable = _resolve_exiftool_executable(config_path)
+    if exiftool_executable is None:
         if config_path is not None:
             hint = f"sdcard getbins --config-path {config_path}"
         else:
             hint = "sdcard getbins --config-path /path/to/config.yml"
         raise typer.BadParameter(
-            "exiftool is required but was not found in PATH. "
+            "exiftool is required but was not found in PATH or in {CATALOG_DIR}/bin. "
             f"Install local binaries with: {hint}"
         )
 
@@ -543,6 +581,7 @@ def xif(
         batch_size,
         workers,
         allowed_suffixes,
+        exiftool_executable,
     )
     typer.echo(
         "📷 EXIF extraction complete: "
