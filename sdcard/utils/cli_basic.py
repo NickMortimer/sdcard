@@ -89,11 +89,11 @@ def register_command(
         overwrite=overwrite,
         refresh=refresh,
         instrument=instrument,
-    prompt_card_details=prompt_card_details,
-    set_label=set_label,
-    format_card=format_card,
-    format_yes=format_yes,
-    format_full=format_full,
+        prompt_card_details=prompt_card_details,
+        set_label=set_label,
+        format_card=format_card,
+        format_yes=format_yes,
+        format_full=format_full,
     )
 
 def list_cards(

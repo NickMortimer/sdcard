@@ -115,9 +115,10 @@ def _set_volume_label(mount_path: Path, label: str, dry_run: bool) -> bool:
             drive_letter = drive[0] if len(drive) >= 2 and drive[1] == ':' else None
             if not drive_letter:
                 return False
+            escaped_label = label.replace("'", "''")
             cmd = [
                 'powershell', '-NoProfile', '-Command',
-                f"Set-Volume -DriveLetter {drive_letter} -NewFileSystemLabel '{label}'"
+                f"Set-Volume -DriveLetter {drive_letter} -NewFileSystemLabel '{escaped_label}'"
             ]
             if dry_run:
                 typer.echo(f"Would run: {' '.join(cmd)}")
@@ -917,7 +918,7 @@ def make_yml(
     else:
         typer.echo(f"✏️  Writing import.yml to {file_path}")
         file_path.write_text(yaml.safe_dump(final_data, sort_keys=False), encoding="utf-8")
-    _write_destination_readme_for_registration(file_path, final_data, config)
+        _write_destination_readme_for_registration(file_path, final_data, config)
 
     _report_registration_result(
         file_path,

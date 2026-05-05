@@ -639,7 +639,8 @@ def thumbnail(
     if copy_meta and shutil.which("exiftool") is None:
         raise typer.BadParameter(
             "exiftool is required for --copy-meta but was not found in PATH. "
-            "Install local binaries with: sdcard getbins --config-path /path/to/config.yml"
+            "Install local binaries with: sdcard getbins --config-path /path/to/config.yml "
+            "(then add {CATALOG_DIR}/bin to your PATH, or restart your terminal)."
         )
 
     if not head_directory.exists():

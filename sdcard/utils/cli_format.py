@@ -50,19 +50,20 @@ def format_command(
         if drive_letter:
             # Use drive letter for Windows PowerShell commands
             drive = drive_letter.upper()
+            escaped_instrument = instrument.replace("'", "''")
             if set_label_only:
                 cmd = [
                     "powershell",
                     "-NoProfile",
                     "-Command",
-                    f"Set-Volume -DriveLetter {drive} -NewFileSystemLabel '{instrument}'"
+                    f"Set-Volume -DriveLetter {drive} -NewFileSystemLabel '{escaped_instrument}'"
                 ]
             else:
                 cmd = [
                     "powershell",
                     "-NoProfile",
                     "-Command",
-                    f"Format-Volume -DriveLetter {drive} -FileSystem {format_type} -NewFileSystemLabel '{instrument}' -Confirm:$false"
+                    f"Format-Volume -DriveLetter {drive} -FileSystem {format_type} -NewFileSystemLabel '{escaped_instrument}' -Confirm:$false"
                 ]
             typer.echo(f"Command: {' '.join(cmd)}")
             if not yes:
