@@ -133,7 +133,17 @@
             "console": "integratedTerminal",
             "justMyCode": true,
             "args":["mount-cards","--all"]
+        },
+        {
+            "name": "sdcard xif",
+            "type": "python",
+            "request": "launch",
+            "program": "/home/mor582/code/sdcard/sdcard/main.py",
+            "console": "integratedTerminal",
+            "justMyCode": true,
+            "args":["xif","--card_store","datasets/work/ev-bep-wal4-inv2026-v02/work/instrumentation/P4RTK/SHE2026-01/raw/sdcards"]
         }
+
     ]
 }
 

@@ -1,23 +1,44 @@
-This repository includes a Conda environment for development on Windows.
+# Development environment (UV)
 
-Quick steps (PowerShell):
+This project uses [uv](https://docs.astral.sh/uv/) for Python dependency management.
 
-```powershell
-# Create the conda environment from environment.yml
-conda env create -f environment.yml
+## Prerequisites
 
-# Activate the environment
-conda activate sdcard
+- [uv](https://docs.astral.sh/uv/getting-started/installation/) installed (`curl -LsSf https://astral.sh/uv/install.sh | sh`)
+- Python 3.11+ available (on HPC: `module load python/3.11.0`)
 
-# Verify Python and installed packages
-python --version
-python -c "import typer, pandas, psutil, yaml; print('imports ok')"
+On systems with a tight home quota (space or inode), keep UV caches and the venv on scratch:
+
+```bash
+export UV_CACHE_DIR=/scratch3/$USER/uv/cache
+export UV_PYTHON_INSTALL_DIR=/scratch3/$USER/uv/python
+export UV_PROJECT_ENVIRONMENT=/scratch3/$USER/uv/venvs/sdcard
+export UV_LINK_MODE=copy
+mkdir -p "$UV_CACHE_DIR" "$UV_PYTHON_INSTALL_DIR" "$(dirname "$UV_PROJECT_ENVIRONMENT")"
 ```
 
-Notes:
-- This environment targets Python 3.11 per `pyproject.toml`.
-- If you don't have conda installed, install Miniconda or Anaconda first: https://docs.conda.io/en/latest/miniconda.html
-- If you prefer to use Poetry for dependency management instead of the pip list above, install `poetry` in the environment and run `poetry install` from the repo root.
-- In VS Code, choose the `sdcard` interpreter (or let the Python extension auto-activate the environment) to run and debug using this env.
+## Setup
 
-Windows-only packages `wmi` and `pywinusb` are included because this project contains Windows-specific code paths.
+```bash
+cd /path/to/sdcard
+module load python/3.11.0   # HPC only, if needed
+uv sync --group dev
+# Optional: make IDEs find the env via .venv
+ln -sfn "$UV_PROJECT_ENVIRONMENT" .venv
+```
+
+## Verify
+
+```bash
+uv run python --version
+uv run python -c "import typer, pandas, psutil, yaml; print('imports ok')"
+uv run sdcard --help
+uv run pytest
+```
+
+## Notes
+
+- Runtime deps and the `sdcard` console script are defined in `pyproject.toml`.
+- Dev tools (pytest) live in the `dev` dependency group.
+- Windows-only packages `wmi` and `pywinusb` install automatically on Windows via environment markers.
+- A Conda `environment.yml` remains for Windows/Conda users who prefer that path.
