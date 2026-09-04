@@ -70,6 +70,12 @@ sdcard xif /path/to/head-directory --ext ARW
 # Create thumbnail files in a sibling thumbnails/ directory
 sdcard thumbnail /path/to/head-directory
 
+# Extract video frames into interim caches (then index with xif)
+sdcard frames /path/to/raw/sdcards
+sdcard frames --card-store --config-path /path/to/config.yml
+sdcard frames /path/to/raw/sdcards --fps 1 --tag Make=DJI --tag Model=FC6310R
+sdcard xif /path/to/interim/frames --ext jpg
+
 # Restrict thumbnail generation to a specific file extension
 sdcard thumbnail /path/to/head-directory --ext ARW
 
@@ -149,6 +155,20 @@ When `--copy-meta` is enabled, it writes extracted metadata into the generated
 thumbnail files by importing the extracted JSON through `exiftool`.
 Use `--ext` to match the same suffix filter you used during `xif` extraction.
 
+The `frames` command extracts JPEGs from videos under a scan root (often
+`card_store` / `raw/sdcards`) into a mirrored tree under `interim/frames` by
+default when the scan root ends with `raw/sdcards`. Each video becomes
+`{stem}.{fps}fps.frames/frame_000001.jpg`, … (so the same clip can be extracted
+at multiple rates without collisions). By default a video is **skipped** when that
+frames directory already has `frame_*.jpg` files; pass `--clean` (or `--force`) to
+delete the whole frames directory and re-extract. Use `--output-dir` to override
+the cache root. Frame files get `DateTimeOriginal` /
+`CreateDate` set to video start plus elapsed time at `--fps`, and inherit
+camera identity tags (`Make`, `Model`, serials, …) from the video’s existing
+`exif.json.zst` entry or an exiftool probe. Override with repeatable
+`--tag KEY=VALUE` or `--tags-json`. Then run `sdcard xif` on the frames root so
+downstream tools see the same sidecar contract as stills.
+
 During import, each destination folder also gets a `README.md` summarizing the project and custodian metadata from the card's `import.yml`.
 
 You can customize that README with either of these config keys:
@@ -221,8 +241,11 @@ import_template : "{{card_store}}/{instrument}/{import_date}/{card_number}_{impo
 ```bash
 git clone https://github.com/NickMortimer/sdcard.git
 cd sdcard
-pip install -e .
+uv sync --group dev
+uv run sdcard --help
 ```
+
+See [ENVIRONMENT.md](ENVIRONMENT.md) for UV setup details (including HPC scratch paths).
 
 ## License
 
