@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 import re
 import shlex
@@ -19,6 +20,8 @@ from sdcard.utils.cli_xif import _normalize_extensions, _resolve_exiftool_execut
 
 
 VIDEO_SUFFIXES = {".mp4", ".mov", ".avi", ".mkv", ".m4v"}
+
+FRAMES_MANIFEST_NAME = "frames.csv"
 
 _START_TIME_KEYS = (
     "MediaCreateDate",
@@ -279,11 +282,38 @@ def _iter_videos(
     return videos
 
 
-def _output_has_frames(output_dir: Path) -> bool:
-    """Return whether an output directory already contains extracted frames."""
-    if not output_dir.is_dir():
-        return False
-    return any(output_dir.glob("frame_*.jpg"))
+def _extraction_complete(output_dir: Path) -> bool:
+    """Return whether a prior run finished (manifest CSV present)."""
+    return (output_dir / FRAMES_MANIFEST_NAME).is_file()
+
+
+def _clear_frame_outputs(output_dir: Path) -> None:
+    """Remove prior frame JPEGs and manifest so a re-extract cannot keep stale files."""
+    if not output_dir.exists():
+        return
+    for path in output_dir.glob("frame_*.jpg"):
+        path.unlink(missing_ok=True)
+    manifest = output_dir / FRAMES_MANIFEST_NAME
+    manifest.unlink(missing_ok=True)
+
+
+def _write_extraction_csv(
+    output_dir: Path,
+    rows: list[dict[str, object]],
+) -> Path:
+    """
+    Write the completion manifest for a finished extraction.
+
+    Presence of this file is the skip/complete signal for later runs.
+    """
+    manifest = output_dir / FRAMES_MANIFEST_NAME
+    fieldnames = ["frame_number", "file", "elapsed_s", "frame_time"]
+    with manifest.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+    return manifest
 
 
 def _extract_frames_with_ffmpeg(
@@ -386,16 +416,22 @@ def _process_video(
     """
     Extract and stamp frames for one video.
 
-    Returns one of: ``extracted``, ``skipped``, ``cleaned``, ``failed``.
+    Returns one of: ``extracted``, ``skipped``.
+    Completion is marked only by writing ``frames.csv`` after all stamps succeed.
     """
     output_dir = _frames_output_dir(video_path, source_root, output_root, fps)
-    has_frames = _output_has_frames(output_dir)
+    complete = _extraction_complete(output_dir)
 
     if clean and output_dir.exists():
         _remove_frames_directory(output_dir)
-        has_frames = False
-    elif has_frames and skip_existing:
+        complete = False
+    elif complete and skip_existing:
         return "skipped"
+
+    # Incomplete prior run (JPEGs without frames.csv) or forced re-extract:
+    # drop stale outputs so frame indices cannot mix across runs.
+    if output_dir.exists():
+        _clear_frame_outputs(output_dir)
 
     metadata, _meta_source = _resolve_video_metadata(video_path, exiftool_executable)
     discovered = _identity_tags_from_metadata(metadata)
@@ -421,15 +457,27 @@ def _process_video(
     if not frames:
         raise RuntimeError(f"ffmpeg produced no frames for {video_path}")
 
+    manifest_rows: list[dict[str, object]] = []
     for index, frame_path in enumerate(frames, start=1):
-        elapsed = timedelta(seconds=(index - 1) / fps)
-        frame_time = start_time + elapsed
+        elapsed_s = (index - 1) / fps
+        frame_time = start_time + timedelta(seconds=elapsed_s)
         _stamp_frame_exif(
             frame_path,
             frame_time,
             identity_tags,
             exiftool_executable,
         )
+        manifest_rows.append(
+            {
+                "frame_number": index,
+                "file": frame_path.name,
+                "elapsed_s": f"{elapsed_s:.6f}".rstrip("0").rstrip(".") or "0",
+                "frame_time": frame_time.isoformat(sep=" ", timespec="seconds"),
+            }
+        )
+
+    # Write last: presence means this extraction finished successfully.
+    _write_extraction_csv(output_dir, manifest_rows)
     return "extracted"
 
 
@@ -484,7 +532,8 @@ def extract_frames_tree(
             skipped += 1
             typer.echo(
                 f"⏭️  skip {video_path.name} "
-                f"({_frames_output_dir(video_path, source_root, output_root, fps)} exists)"
+                f"({FRAMES_MANIFEST_NAME} present in "
+                f"{_frames_output_dir(video_path, source_root, output_root, fps)})"
             )
 
     return {
@@ -509,7 +558,10 @@ def frames(
     skip_existing: bool = typer.Option(
         True,
         "--skip/--no-skip",
-        help="Skip videos whose {stem}.{fps}fps.frames dir already has frames",
+        help=(
+            "Skip videos whose frames.csv completion manifest already exists "
+            "in {stem}.{fps}fps.frames"
+        ),
     ),
     clean: bool = typer.Option(
         False,

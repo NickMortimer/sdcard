@@ -147,6 +147,12 @@ def test_frames_cli_extracts_stamps_and_inherits(tmp_path, monkeypatch) -> None:
     out_dir = tmp_path / "interim" / "frames" / "day" / "card" / "clip.1fps.frames"
     assert (out_dir / "frame_000001.jpg").is_file()
     assert (out_dir / "frame_000002.jpg").is_file()
+    manifest = out_dir / "frames.csv"
+    assert manifest.is_file()
+    text = manifest.read_text(encoding="utf-8")
+    assert "frame_number,file,elapsed_s,frame_time" in text
+    assert "1,frame_000001.jpg,0,2026-08-03 13:00:31" in text
+    assert "2,frame_000002.jpg,1,2026-08-03 13:00:32" in text
 
 
 def test_frames_cli_tag_overrides_win(tmp_path, monkeypatch) -> None:
@@ -200,7 +206,7 @@ def test_frames_cli_tag_overrides_win(tmp_path, monkeypatch) -> None:
     assert stamped[0]["Model"] == "FC6310R"
 
 
-def test_frames_skips_existing_by_default(tmp_path, monkeypatch) -> None:
+def test_frames_retries_incomplete_dir_without_manifest(tmp_path, monkeypatch) -> None:
     source = tmp_path / "videos"
     source.mkdir()
     video = source / "clip.mp4"
@@ -208,6 +214,45 @@ def test_frames_skips_existing_by_default(tmp_path, monkeypatch) -> None:
     out = tmp_path / "out" / "clip.1fps.frames"
     out.mkdir(parents=True)
     (out / "frame_000001.jpg").write_bytes(b"old")
+    # Incomplete prior run: JPEGs present but no frames.csv → must re-extract
+
+    called = {"ffmpeg": 0}
+
+    def fake_ffmpeg(video_path, output_dir, fps, ffmpeg_executable):
+        called["ffmpeg"] += 1
+        output_dir.mkdir(parents=True, exist_ok=True)
+        path = output_dir / "frame_000001.jpg"
+        path.write_bytes(b"new")
+        return [path]
+
+    monkeypatch.setattr(cli_frames.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(cli_frames, "_resolve_exiftool_executable", lambda _: "exiftool")
+    monkeypatch.setattr(cli_frames, "_extract_frames_with_ffmpeg", fake_ffmpeg)
+    monkeypatch.setattr(cli_frames, "_stamp_frame_exif", lambda *_a, **_k: None)
+
+    result = runner.invoke(
+        sdcard,
+        ["frames", str(source), "--output-dir", str(tmp_path / "out")],
+    )
+    assert result.exit_code == 0, result.output
+    assert "extracted 1" in result.output
+    assert called["ffmpeg"] == 1
+    assert (out / "frames.csv").is_file()
+
+
+def test_frames_skips_when_manifest_complete(tmp_path, monkeypatch) -> None:
+    source = tmp_path / "videos"
+    source.mkdir()
+    video = source / "clip.mp4"
+    video.write_bytes(b"fake")
+    out = tmp_path / "out" / "clip.1fps.frames"
+    out.mkdir(parents=True)
+    (out / "frame_000001.jpg").write_bytes(b"old")
+    (out / "frames.csv").write_text(
+        "frame_number,file,elapsed_s,frame_time\n"
+        "1,frame_000001.jpg,0,2026-08-03 13:00:31\n",
+        encoding="utf-8",
+    )
 
     called = {"ffmpeg": 0}
 

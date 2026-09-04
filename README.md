@@ -159,10 +159,13 @@ The `frames` command extracts JPEGs from videos under a scan root (often
 `card_store` / `raw/sdcards`) into a mirrored tree under `interim/frames` by
 default when the scan root ends with `raw/sdcards`. Each video becomes
 `{stem}.{fps}fps.frames/frame_000001.jpg`, … (so the same clip can be extracted
-at multiple rates without collisions). By default a video is **skipped** when that
-frames directory already has `frame_*.jpg` files; pass `--clean` (or `--force`) to
-delete the whole frames directory and re-extract. Use `--output-dir` to override
-the cache root. Frame files get `DateTimeOriginal` /
+at multiple rates without collisions). When extraction finishes successfully it
+writes `frames.csv` (frame number, file, elapsed offset seconds, calculated
+`frame_time`). That CSV is the completion marker: by default a video is
+**skipped** when `frames.csv` already exists. Incomplete dirs (JPEGs without the
+CSV, e.g. after a failed ffmpeg/exiftool run) are re-extracted automatically.
+Pass `--clean` (or `--force`) to delete the whole frames directory and redo.
+Use `--output-dir` to override the cache root. Frame files get `DateTimeOriginal` /
 `CreateDate` set to video start plus elapsed time at `--fps`, and inherit
 camera identity tags (`Make`, `Model`, serials, …) from the video’s existing
 `exif.json.zst` entry or an exiftool probe. Override with repeatable
