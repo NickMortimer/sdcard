@@ -7,6 +7,11 @@ ENV/
 env.bak/
 venv.bak/
 
+# Accidental local data / voyage trees (never commit)
+SHE202*/
+…/
+.../
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 
