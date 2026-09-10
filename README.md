@@ -73,7 +73,7 @@ sdcard thumbnail /path/to/head-directory
 # Extract video frames into interim caches (then index with xif)
 sdcard frames /path/to/raw/sdcards
 sdcard frames --card-store --config-path /path/to/config.yml
-sdcard frames /path/to/raw/sdcards --fps 1 --tag Make=DJI --tag Model=FC6310R
+sdcard frames /path/to/raw/sdcards --fps 1 --workers 4 --tag Make=DJI --tag Model=FC6310R
 sdcard xif /path/to/interim/frames --ext jpg
 
 # Restrict thumbnail generation to a specific file extension
@@ -165,10 +165,14 @@ writes `frames.csv` (frame number, file, elapsed offset seconds, calculated
 **skipped** when `frames.csv` already exists. Incomplete dirs (JPEGs without the
 CSV, e.g. after a failed ffmpeg/exiftool run) are re-extracted automatically.
 Pass `--clean` (or `--force`) to delete the whole frames directory and redo.
-Use `--output-dir` to override the cache root. Frame files get `DateTimeOriginal` /
+Use `--output-dir` to override the cache root. Videos are processed in parallel
+(`--workers`, default 4) with a live Rich status table (same style as `sdcard xif`).
+Frame files get `DateTimeOriginal` /
 `CreateDate` set to video start plus elapsed time at `--fps`, and inherit
 camera identity tags (`Make`, `Model`, serials, …) from the video’s existing
-`exif.json.zst` entry or an exiftool probe. Override with repeatable
+`exif.json.zst` entry or an exiftool probe—filling gaps from stills in the same
+folder or other `exif.json.zst` directories under the same `DCIM` (e.g. survey
+stills when video lives in `100MEDIA`). Override with repeatable
 `--tag KEY=VALUE` or `--tags-json`. Then run `sdcard xif` on the frames root so
 downstream tools see the same sidecar contract as stills.
 
